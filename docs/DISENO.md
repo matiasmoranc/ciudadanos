@@ -12,6 +12,8 @@ src/core/     Simulación pura: sin Phaser, sin DOM, sin Math.random ni Date.
   types.ts    Estructuras de datos.
   mapgen.ts   Mapa procedural a partir de una semilla.
   game.ts     Estado, comandos validados y tick.
+  trade.ts    Ofertas entre jugadores y mercado neutral.
+  path.ts     Rutas por tierra para viajes largos.
   bot.ts      IA. Solo usa los mismos comandos que un humano.
   match.ts    Une tick + bots: es lo que correría un servidor.
 src/render/   Phaser: dibuja el estado, nunca lo modifica.
@@ -37,11 +39,13 @@ Definidas en `src/core/types.ts`.
 | `Player` | color, bot o humano, **inventario global**, reloj de escasez |
 | `Base` | dueño, sitio, trabajos pedidos, trabajos efectivos, supervivencia automática, progreso de reproducción |
 | `Citizen` | base, trabajo, estado (`idle`/`walk`/`work`), objetivo, posición |
-| `Building` | tipo, base, posición, progreso |
-| `ResourceNode` | árbol, roca, arbusto u orilla; cantidad restante |
-| `Site` | ubicación fundable, nombre, recursos alcanzables, estrellas |
+| `Building` | tipo, base, posición, progreso, nivel, mejora en curso |
+| `Expedition` | dueño, destino, colonos, ruta, posición |
+| `Offer` | quién ofrece, a quién, qué da, qué pide, respuestas |
+| `ResourceNode` | árbol, roca, arbusto, orilla, hierro u oro; cantidad restante |
+| `Site` | ubicación fundable, nombre, recursos alcanzables, estrellas, especialidad |
 
-Soldados, hierro, oro y comercio se agregan en sus etapas. Las listas `RESOURCES`, `JOBS` y `BUILDINGS` están pensadas para extenderse sin tocar la lógica de turnos.
+Los soldados se agregan en la Etapa 3. Las listas `RESOURCES`, `JOBS` y `BUILDINGS` están pensadas para extenderse sin tocar la lógica de turnos.
 
 ## 3. Producción y consumo
 
@@ -54,12 +58,16 @@ La simulación corre a 10 ticks por segundo con reloj fijo.
 | Comida, recolección | 9 s | 6,7 / min |
 | Comida, en granja | 6 s | 10 / min |
 | Agua | 7 s | 8,6 / min |
+| Hierro | 12 s | 5 / min |
+| Oro | 16 s | 3,75 / min |
 
 Cada persona consume 1,5 de comida y 1,5 de agua por minuto. Sale una regla simple: **un recolector alimenta a unas 4,4 personas, un granjero a 6,7 y un aguatero a 5,7.** Alrededor del 40 % de la población se dedica a sobrevivir y el resto hace crecer la civilización. Ahí está la decisión central del juego.
 
 Producción neta mostrada = trabajadores con fuente × tasa × productividad − consumo. Se calcula por base y se suma.
 
 El mapa pone el límite: árboles, rocas y arbustos son finitos, y las orillas y los pozos no se agotan. Las granjas tienen 3 puestos y producción infinita, pero cuestan madera y agua.
+
+**Especialidad regional.** Cada región rinde 25 % más en lo suyo: bosque en madera, montaña en piedra y hierro, cantera en oro, pradera en comida, valle en comida y agua, llanura en construcción. Se suma a lo que ya marca la geografía, que es la mayor diferencia.
 
 **Escasez.** Con un recurso vital en cero, la productividad baja al 60 % y se frena la reproducción. Tras 60 s de gracia muere un ciudadano cada 12 s, siempre de la base más poblada. Antes de llegar a cero aparece el aviso «Tu comida se agotará en N segundos» si faltan menos de 90 s.
 
@@ -86,13 +94,18 @@ Hay un reloj central en ticks. En la Etapa 1 las fases son:
 
 - `draft`: selección serpiente (1-2-3-4, 4-3-2-1), 30 s por elección. Si vence, se elige automáticamente. La simulación todavía no corre.
 - `decisions`: 30 s del jugador activo. **Es la única fase que acepta órdenes.** Se puede terminar antes.
+- `trade`: 30 s de comercio del mismo jugador. Puede proponer y usar el mercado, pero no cambiar órdenes. Termina antes con «Finalizar fase»; un bot sin ofertas abiertas pasa de inmediato.
 - `over`: fin de partida.
 
-La fase de Comercio es de la Etapa 2. No se muestra un temporizador vacío: se suma cuando el comercio exista de verdad.
+Los demás jugadores solo pueden responder ofertas: es la única excepción a «no tocar nada fuera de tu turno», y `issue` la atiende antes de mirar de quién es el turno.
+
+**Comercio.** Una oferta se valida al proponerla y otra vez al aceptarla, porque el stock puede haber cambiado. El intercambio descuenta de ambos lados antes de sumar, así que nunca crea ni deja recursos negativos. Las ofertas abiertas vencen al terminar la fase. Una contraoferta rechaza la original y crea otra en sentido inverso; los bots regatean una sola vez.
+
+**Mercado neutral.** Precio de referencia: 1 los recursos básicos, 3 el hierro, 5 el oro. Paga el doble de ese valor por cada lote de 5, así que solo conviene si nadie quiere comerciar.
 
 La economía corre en todos los turnos porque el tick no mira de quién es el turno. Solo `issue` lo mira.
 
-**Fin de partida.** Tras 24 rondas gana quien tenga más puntos: 2 por ciudadano, 5 por edificio, 10 por base. Si tu población llega a cero, perdés. Si queda un solo jugador vivo, gana. Con bots tardando 4 a 8 s, una ronda dura alrededor de 50 s si usás tu tiempo y la partida unos 20 minutos.
+**Fin de partida.** Tras 24 rondas gana quien tenga más puntos: 2 por ciudadano, 5 por edificio, 3 por mejora, 10 por base. Si tu población llega a cero, perdés. Si queda un solo jugador vivo, gana. Usando tus dos fases completas, una ronda dura cerca de 1 minuto y 30 segundos y la partida unos 35 minutos.
 
 ## 6. Costos y tiempos
 
@@ -103,7 +116,20 @@ La economía corre en todos los turnos porque el tick no mira de quién es el tu
 | Pozo | 20 piedra + 10 madera | 15 s | 3 puestos de agua en cualquier lugar |
 | Depósito | 25 madera + 15 piedra | 20 s | +200 de capacidad global |
 
-Inicio: 60 madera, 30 piedra, 50 comida, 50 agua; capacidad 300 por recurso.
+| Nueva base | 60 madera + 40 piedra + 20 comida | Viaje según distancia | Envía 3 ciudadanos a fundar |
+
+Inicio: 60 madera, 30 piedra, 50 comida, 50 agua, sin hierro ni oro; capacidad 300 por recurso.
+
+| Mejora | Costo | Obra (1 constructor) | Efecto |
+|---|---|---|---|
+| Casa reforzada | 20 madera + 10 hierro | 15 s | +4 de capacidad |
+| Granja con riego | 15 madera + 8 hierro | 12 s | 15 comida/min por trabajador |
+| Pozo profundo | 15 piedra + 8 hierro | 12 s | +2 puestos |
+| Gran depósito | 20 piedra + 10 hierro + 5 oro | 15 s | +150 de capacidad global |
+
+Un edificio se mejora una vez y sigue funcionando durante la obra.
+
+**Expediciones.** Salen primero los ciudadanos sin trabajo, reservan el destino desde que parten y siguen contando como población mientras viajan. La ruta usa una búsqueda sobre la grilla del mapa: vadean ríos y rodean lagos. La interceptación llega con los soldados, en la Etapa 3.
 
 El Pozo no estaba en la lista de la Etapa 1 y se adelantó: sin él, una base lejos del agua quedaría sin salida.
 
@@ -114,12 +140,15 @@ El Pozo no estaba en la lista de la Etapa 1 y se adelantó: sin él, una base le
 - **Base de 2 sin salida.** Dos ciudadanos no pueden trabajar y reproducirse a la vez: fundar 2 bases reparte fuerzas. Es una decisión intencional del prompt, pero conviene revisarla jugando.
 - **Base con menos de 2.** No puede reproducirse y en la Etapa 1 no hay migración. Por eso las muertes por escasez salen de la base más poblada. La expedición de la Etapa 2 lo resuelve.
 - **Agotamiento.** Sin regeneración hasta la Etapa 4, una base de pocos árboles se queda sin madera. Es parte de elegir bien; el comercio y las nuevas bases lo alivian más adelante.
+- **Hierro y oro sin destino fuerte.** Por ahora solo pagan mejoras y comercio. Su valor real llega con cuarteles y soldados en la Etapa 3.
+- **Comercio entre bots.** Hacen pocos tratos (0 a 3 por partida en las simulaciones): cada uno regatea con cuidado y sus stocks se parecen. Con una persona en la mesa, en la prueba real aceptaron ofertas razonables.
+- **Expansión tardía.** Como las expediciones necesitan más de 3 ciudadanos en origen, hay que crecer antes de expandirse. Es intencional.
 - **Bola de nieve.** La reproducción crece rápido si hay vivienda. Las casas exigen madera y piedra a la vez, lo que frena a quien solo tiene una.
 
 ## 8. Etapas
 
-- **Etapa 1 (esta):** mapa, draft, turnos, ciudadanos autónomos, trabajos, inventario global, casas, granjas, pozos, depósitos, reproducción, consumo, construcción automática, bots básicos y puntaje.
-- **Etapa 2:** hierro, oro, nuevas bases, comercio, mercado.
+- **Etapa 1 (hecha):** mapa, draft, turnos, ciudadanos autónomos, trabajos, inventario global, casas, granjas, pozos, depósitos, reproducción, consumo, construcción automática, bots básicos y puntaje.
+- **Etapa 2 (hecha):** hierro, oro, nuevas bases, comercio, mercado neutral, mejoras, especialidad regional y alertas.
 - **Etapa 3:** soldados, combate, defensas, saqueo.
 - **Etapa 4:** mundo vivo.
 - **Etapa 5:** online, tutorial, sonido, bots con tres dificultades.

@@ -1,4 +1,4 @@
-import { BASE_RADIUS, NODE_AMOUNT, NODE_SLOTS, RESOURCE_INFO, WORLD_SIZE } from './config';
+import { BASE_RADIUS, NODE_AMOUNT, NODE_SLOTS, REGION_SPECIALTY, RESOURCE_INFO, WORLD_SIZE } from './config';
 import { makeNoise, makeRng } from './rng';
 import { Terrain } from './types';
 import type { Biome, GameMap, NodeKind, Point, ResourceId, ResourceNode, Site } from './types';
@@ -39,17 +39,19 @@ const DENSITY: Partial<Record<Terrain, Partial<Record<NodeKind, number>>>> = {
   [Terrain.Forest]: { tree: 0.95, bush: 0.14, rock: 0.03 },
   [Terrain.Meadow]: { bush: 0.34, tree: 0.1 },
   [Terrain.Fertile]: { bush: 0.42, tree: 0.06 },
-  [Terrain.Plains]: { bush: 0.16, tree: 0.08, rock: 0.04 },
-  [Terrain.Rocky]: { rock: 0.3, bush: 0.03, tree: 0.05 },
-  [Terrain.Mountain]: { rock: 0.42, tree: 0.08, bush: 0.03 },
+  [Terrain.Plains]: { bush: 0.16, tree: 0.08, rock: 0.04, iron: 0.01 },
+  [Terrain.Rocky]: { rock: 0.3, gold: 0.09, iron: 0.05, bush: 0.03, tree: 0.05 },
+  [Terrain.Mountain]: { rock: 0.42, iron: 0.14, gold: 0.03, tree: 0.08, bush: 0.03 },
   [Terrain.Beach]: { bush: 0.02 },
 };
 
 const STAR_THRESHOLDS: Record<ResourceId, number[]> = {
   wood: [300, 700, 1500, 2800],
   stone: [240, 600, 1300, 2400],
+  iron: [30, 90, 240, 500],
   food: [150, 300, 550, 900],
   water: [1, 2, 4, 7],
+  gold: [20, 40, 120, 240],
 };
 
 const cellIndex = (x: number, y: number) => {
@@ -64,6 +66,22 @@ export function terrainAt(map: GameMap, x: number, y: number): Terrain {
 
 export function isLand(map: GameMap, x: number, y: number): boolean {
   return terrainAt(map, x, y) >= Terrain.Beach;
+}
+
+/** A pie se vadean los ríos; solo el mar y los lagos cortan el paso. */
+export function isPassable(map: GameMap, x: number, y: number): boolean {
+  const kind = terrainAt(map, x, y);
+  return kind !== Terrain.Ocean && kind !== Terrain.Lake;
+}
+
+export function segmentPassable(map: GameMap, a: Point, b: Point): boolean {
+  const dist = Math.hypot(b.x - a.x, b.y - a.y);
+  const steps = Math.max(1, Math.ceil(dist / (CELL * 0.8)));
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    if (!isPassable(map, a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)) return false;
+  }
+  return true;
 }
 
 export function segmentClear(map: GameMap, a: Point, b: Point): boolean {
@@ -256,7 +274,7 @@ export function generateMap(seed: number): GameMap {
       const table = DENSITY[terrain[cellIndex(x, y)] as Terrain];
       if (!table) continue;
       let acc = 0;
-      for (const kind of ['tree', 'rock', 'bush'] as NodeKind[]) {
+      for (const kind of ['tree', 'rock', 'bush', 'iron', 'gold'] as NodeKind[]) {
         acc += table[kind] ?? 0;
         if (roll < acc) {
           addNode(kind, x, y);
@@ -308,6 +326,7 @@ export function generateMap(seed: number): GameMap {
       x: s.x,
       y: s.y,
       biome,
+      specialty: REGION_SPECIALTY[biome],
       name: SITE_NAMES[biome][nameIndex % SITE_NAMES[biome].length],
       nodeIds,
       ...rateSite(nodes, nodeIds),
@@ -345,19 +364,23 @@ function isLandCell(terrain: Uint8Array, x: number, y: number) {
 }
 
 function rateSite(nodes: ResourceNode[], nodeIds: number[]) {
-  const totals: Record<ResourceId, number> = { wood: 0, stone: 0, food: 0, water: 0 };
+  const totals: Record<ResourceId, number> = { wood: 0, stone: 0, iron: 0, gold: 0, food: 0, water: 0 };
   nodeIds.forEach((id) => {
     const node = nodes[id];
     if (node.kind === 'tree') totals.wood += node.amount;
     if (node.kind === 'rock') totals.stone += node.amount;
     if (node.kind === 'bush') totals.food += node.amount;
     if (node.kind === 'water') totals.water += 1;
+    if (node.kind === 'iron') totals.iron += node.amount;
+    if (node.kind === 'gold') totals.gold += node.amount;
   });
   const stars = {
     wood: starsFor('wood', totals.wood),
     stone: starsFor('stone', totals.stone),
+    iron: starsFor('iron', totals.iron),
     food: starsFor('food', totals.food),
     water: starsFor('water', totals.water),
+    gold: starsFor('gold', totals.gold),
   };
   const ranked = (Object.keys(stars) as ResourceId[]).sort((a, b) => stars[b] - stars[a]);
   const best = ranked[0];

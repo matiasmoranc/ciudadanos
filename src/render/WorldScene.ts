@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 import { BASE_RADIUS, TICKS_PER_SECOND } from '../core/config';
-import { capacityOf, citizensOf, siteAvailability } from '../core/game';
+import { capacityOf, citizensOf, needsWork, siteAvailability } from '../core/game';
 import { stepMatch } from '../core/match';
 import type { Base, Building, Citizen, GameState, ResourceNode } from '../core/types';
 import { ART_SCALE, buildingKey, citizenKey, createArt } from './art';
@@ -10,7 +10,7 @@ import { paintTerrain } from './terrain';
 export interface SceneHost {
   state: GameState;
   speed: number;
-  selection(): { baseId: number | null; siteId: number | null };
+  selection(): { baseId: number | null; siteId: number | null; picking: boolean };
   onTapBase(id: number): void;
   onTapSite(id: number): void;
   onTapEmpty(): void;
@@ -34,7 +34,14 @@ interface BuildingView {
   sprite: Phaser.GameObjects.Image;
   flag?: Phaser.GameObjects.Image;
   bar: Phaser.GameObjects.Graphics;
+  star?: Phaser.GameObjects.Image;
   done: boolean;
+}
+
+interface ExpeditionView {
+  sprites: Phaser.GameObjects.Image[];
+  x: number;
+  y: number;
 }
 
 interface BaseView {
@@ -52,6 +59,7 @@ export class WorldScene extends Phaser.Scene {
   private citizenViews = new Map<number, CitizenView>();
   private buildingViews = new Map<number, BuildingView>();
   private baseViews = new Map<number, BaseView>();
+  private expeditionViews = new Map<number, ExpeditionView>();
   private siteMarks = new Map<number, Phaser.GameObjects.Graphics>();
   private influence!: Phaser.GameObjects.Graphics;
 
@@ -185,7 +193,7 @@ export class WorldScene extends Phaser.Scene {
       const p = toScreen(x, y);
       return Math.hypot(p.x - worldX, (p.y - 14 - worldY) * 1.2);
     };
-    if (state.phase.kind === 'draft') {
+    if (state.phase.kind === 'draft' || this.host.selection().picking) {
       let best = -1;
       let bestDistance = reach;
       for (const site of state.map.sites) {
@@ -235,6 +243,7 @@ export class WorldScene extends Phaser.Scene {
 
     const time = this.time.now;
     this.syncCitizens(state, delta, time);
+    this.syncExpeditions(state, delta, time);
     if (time - this.lastSync > 120) {
       this.lastSync = time;
       this.syncNodes(state, time);
@@ -285,6 +294,36 @@ export class WorldScene extends Phaser.Scene {
     }
   }
 
+  private syncExpeditions(state: GameState, delta: number, time: number) {
+    const ease = Math.min(1, (delta / 1000) * 9);
+    const seen = new Set<number>();
+    for (const e of state.expeditions) {
+      seen.add(e.id);
+      const p = toScreen(e.x, e.y);
+      let view = this.expeditionViews.get(e.id);
+      if (!view) {
+        const sprites = Array.from({ length: e.settlers }, () =>
+          this.add.image(p.x, p.y, citizenKey(e.owner, 'idle')).setOrigin(0.45, 0.9).setScale(pxScale * 1.15),
+        );
+        view = { sprites, x: p.x, y: p.y };
+        this.expeditionViews.set(e.id, view);
+      }
+      const dx = p.x - view.x;
+      view.x += dx * ease;
+      view.y += (p.y - view.y) * ease;
+      view.sprites.forEach((sprite, i) => {
+        const bob = Math.abs(Math.sin(time * 0.012 + i * 1.7)) * 1.3;
+        const y = view.y + (i - 1) * 3;
+        sprite.setPosition(view.x - Math.sign(dx || 1) * i * 6, y - bob).setFlipX(dx < 0).setDepth(y + 1);
+      });
+    }
+    for (const [id, view] of this.expeditionViews) {
+      if (seen.has(id)) continue;
+      view.sprites.forEach((sprite) => sprite.destroy());
+      this.expeditionViews.delete(id);
+    }
+  }
+
   private syncNodes(state: GameState, time: number) {
     for (const [id, sprite] of this.nodeViews) {
       const node = state.nodes[id];
@@ -293,7 +332,7 @@ export class WorldScene extends Phaser.Scene {
         this.removeNode(node, sprite);
         continue;
       }
-      if (node.kind === 'rock' || node.kind === 'bush') {
+      if (node.kind !== 'tree') {
         const ratio = 0.55 + (node.amount / node.max) * 0.45;
         sprite.setScale(pxScale * sprite.getData('size') * ratio);
       }
@@ -352,13 +391,18 @@ export class WorldScene extends Phaser.Scene {
     for (const building of state.buildings) {
       const view = this.buildingViews.get(building.id) ?? this.addBuilding(building);
       if (building.done && !view.done) this.finishBuilding(building, view);
-      if (!building.done) {
-        const ratio = building.progress / building.required;
+      view.bar.clear();
+      if (needsWork(building)) {
+        const ratio = Math.min(1, building.progress / building.required);
         const p = toScreen(building.x, building.y);
-        view.bar.clear();
         view.bar.fillStyle(0x21302a, 0.8).fillRoundedRect(p.x - 15, p.y + 7, 30, 5, 2);
         view.bar.fillStyle(0xffd35c, 1).fillRoundedRect(p.x - 14, p.y + 8, 28 * ratio, 3, 1.5);
-      } else if (building.type === 'farm') {
+      }
+      if (building.level > 1 && !view.star) {
+        const p = toScreen(building.x, building.y);
+        view.star = this.add.image(p.x + 13, p.y - 2, 'upgrade-star').setScale(pxScale).setDepth(p.y + 2);
+      }
+      if (building.done && building.type === 'farm') {
         const stage = Math.floor((time * 0.00025 + building.id) % 3);
         view.sprite.setTexture(`crops-${stage}`);
       }
@@ -376,7 +420,6 @@ export class WorldScene extends Phaser.Scene {
 
   private finishBuilding(building: Building, view: BuildingView) {
     view.done = true;
-    view.bar.destroy();
     const p = toScreen(building.x, building.y);
     if (building.type === 'farm') {
       view.sprite.setTexture('crops-0').setOrigin(0.5, 0.5).setDepth(p.y - 12);
@@ -392,7 +435,7 @@ export class WorldScene extends Phaser.Scene {
   }
 
   private syncSiteMarks(state: GameState, time: number) {
-    const draft = state.phase.kind === 'draft';
+    const draft = state.phase.kind === 'draft' || this.host.selection().picking;
     const selected = this.host.selection().siteId;
     for (const site of state.map.sites) {
       const mark = this.siteMarks.get(site.id)!;

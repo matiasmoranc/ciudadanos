@@ -142,6 +142,23 @@ export function createArt(scene: Phaser.Scene, colors: number[]) {
     poly(c, [6, 6, 13, 3, 21, 6, 15, 10, 8, 10], '#b5b7ba');
     poly(c, [15, 10, 21, 6, 24, 15, 16, 17], '#74767b');
   });
+  const vein = (key: string, base: string, light: string, fleck: string) =>
+    make(scene, key, 26, 20, (c) => {
+      shadow(c, 13, 16.5, 11, 3.2);
+      poly(c, [2, 15, 6, 6, 13, 3, 21, 6, 24, 15, 13, 18], base);
+      poly(c, [6, 6, 13, 3, 21, 6, 15, 10, 8, 10], light);
+      for (const [x, y] of [[7, 12], [11, 8], [16, 13], [19, 9], [12, 14]]) blob(c, x, y, 1.5, fleck);
+    });
+  vein('iron', '#7a6a64', '#9b8880', '#c8683a');
+  vein('gold', '#8d8574', '#b0a48c', '#ffd23f');
+  make(scene, 'upgrade-star', 14, 14, (c) => {
+    blob(c, 7, 7, 6.4, '#21302a');
+    c.fillStyle = '#ffd23f';
+    c.font = 'bold 11px sans-serif';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillText('★', 7, 7.4);
+  });
   make(scene, 'bush', 20, 16, (c) => {
     shadow(c, 10, 13, 8, 2.6);
     blob(c, 6, 9, 4.6, '#4e9c45');

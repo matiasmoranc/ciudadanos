@@ -35,7 +35,8 @@ function showMenu() {
       <li>Tocá una base y repartí a sus ciudadanos con + y −.</li>
       <li>Trabajan solos, incluso en los turnos de los demás.</li>
       <li>Cuidá la comida y el agua: sin ellas, tu gente muere.</li>
-      <li>Construí casas, reproducite y sumá más puntos en ${TOTAL_ROUNDS} rondas.</li>
+      <li>Comerciá lo que te sobra y fundá nuevas bases.</li>
+      <li>Construí, reproducite y sumá más puntos en ${TOTAL_ROUNDS} rondas.</li>
     </ol>
     <div class="field">Bots rivales</div>
     <div class="choices">${choices}</div>
@@ -62,7 +63,7 @@ function start() {
   const host: SceneHost = {
     state,
     speed: Number(params.get('speed')) || 1,
-    selection: () => ({ baseId: hud.selectedBase, siteId: hud.selectedSite }),
+    selection: () => ({ baseId: hud.selectedBase, siteId: hud.selectedSite, picking: hud.expanding !== null }),
     onTapBase: (id) => hud.tapBase(id),
     onTapSite: (id) => hud.tapSite(id),
     onTapEmpty: () => hud.tapEmpty(),

@@ -6,8 +6,13 @@ import {
   BUILDINGS,
   CONSUMPTION_PER_MIN,
   DEPOT_STORAGE,
+  DEPOT_UPGRADE_STORAGE,
   DRAFT_SECONDS,
+  EXPEDITION_COST,
+  EXPEDITION_SETTLERS,
+  FARM_UPGRADE_SECONDS,
   HOUSE_CAPACITY,
+  HOUSE_UPGRADE_CAPACITY,
   JOBS,
   MAX_POPULATION,
   MIN_BASE_DISTANCE,
@@ -19,6 +24,7 @@ import {
   SHORTAGE_GRACE_SECONDS,
   SHORTAGE_PRODUCTIVITY,
   SHORTAGE_WARNING_SECONDS,
+  SPECIALTY_BONUS,
   START_CITIZENS,
   START_STOCK,
   SURVIVAL_LOW,
@@ -26,21 +32,28 @@ import {
   SURVIVAL_SHARE,
   TICKS_PER_SECOND,
   TOTAL_ROUNDS,
+  TRADE_SECONDS,
   TURN_SECONDS,
+  UPGRADES,
   WALK_SPEED,
+  WELL_UPGRADE_SLOTS,
   WORKSITE_SLOTS,
   WORK_RANGE,
   WORK_SECONDS,
   seconds,
 } from './config';
 import { generateMap, isLand, segmentClear } from './mapgen';
+import { findPath } from './path';
 import { stepRng } from './rng';
+import { counter, market, propose, respond } from './trade';
 import type {
   Base,
+  Building,
   BuildingType,
   Citizen,
   Command,
   CommandResult,
+  Expedition,
   GameEvent,
   GameState,
   Job,
@@ -49,6 +62,7 @@ import type {
   ResourceId,
   ResourceNode,
   Site,
+  Stock,
   Target,
   ToastLevel,
 } from './types';
@@ -62,13 +76,15 @@ export interface PlayerSetup {
 export const emptyJobs = (): Record<Job, number> => ({
   wood: 0,
   stone: 0,
+  iron: 0,
+  gold: 0,
   food: 0,
   water: 0,
   build: 0,
   reproduce: 0,
 });
 
-function random(s: GameState): number {
+export function random(s: GameState): number {
   const [next, value] = stepRng(s.rng);
   s.rng = next;
   return value;
@@ -97,6 +113,8 @@ export function createGame(seed: number, setups: PlayerSetup[]): GameState {
     bases: [],
     citizens: [],
     buildings: [],
+    expeditions: [],
+    offers: [],
     events: [],
     warned: {},
     nextId: 1,
@@ -104,7 +122,7 @@ export function createGame(seed: number, setups: PlayerSetup[]): GameState {
   return s;
 }
 
-function say(s: GameState, player: number | null, text: string, level: ToastLevel = 'info') {
+export function say(s: GameState, player: number | null, text: string, level: ToastLevel = 'info') {
   const event: GameEvent = { player, text, level };
   s.events.push(event);
   if (s.events.length > 60) s.events.shift();
@@ -121,15 +139,25 @@ function warn(s: GameState, key: string, player: number, text: string, level: To
 // ---- Consultas -------------------------------------------------------------
 
 export const citizensOf = (s: GameState, baseId: number) => s.citizens.filter((c) => c.baseId === baseId);
-export const populationOf = (s: GameState, player: number) => s.citizens.filter((c) => c.owner === player).length;
+export const populationOf = (s: GameState, player: number) =>
+  s.citizens.filter((c) => c.owner === player).length +
+  s.expeditions.reduce((sum, e) => sum + (e.owner === player ? e.settlers : 0), 0);
 export const basesOf = (s: GameState, player: number) => s.bases.filter((b) => b.owner === player);
 
 export const capacityOf = (s: GameState, base: Base) =>
-  BASE_HOUSING +
-  s.buildings.filter((b) => b.baseId === base.id && b.type === 'house' && b.done).length * HOUSE_CAPACITY;
+  s.buildings
+    .filter((b) => b.baseId === base.id && b.type === 'house' && b.done)
+    .reduce((sum, b) => sum + HOUSE_CAPACITY + (b.level > 1 ? HOUSE_UPGRADE_CAPACITY : 0), BASE_HOUSING);
 
 export const storageOf = (s: GameState, player: number) =>
-  BASE_STORAGE + s.buildings.filter((b) => b.owner === player && b.type === 'depot' && b.done).length * DEPOT_STORAGE;
+  s.buildings
+    .filter((b) => b.owner === player && b.type === 'depot' && b.done)
+    .reduce((sum, b) => sum + DEPOT_STORAGE + (b.level > 1 ? DEPOT_UPGRADE_STORAGE : 0), BASE_STORAGE);
+
+/** Una obra nueva o una mejora en curso: en ambos casos hacen falta constructores. */
+export const needsWork = (b: Building) => !b.done || b.upgrading;
+
+const slotsOf = (b: Building) => WORKSITE_SLOTS + (b.type === 'well' && b.level > 1 ? WELL_UPGRADE_SLOTS : 0);
 
 export const assignedTotal = (base: Base) => JOBS.reduce((sum, job) => sum + base.jobs[job], 0);
 
@@ -141,25 +169,28 @@ export function scoreOf(s: GameState, player: number) {
   const citizens = populationOf(s, player);
   const buildings = s.buildings.filter((b) => b.owner === player && b.done).length;
   const bases = basesOf(s, player).length;
+  const upgrades = s.buildings.filter((b) => b.owner === player && b.level > 1).length;
   return {
     citizens,
     buildings,
     bases,
-    total: citizens * SCORE.citizen + buildings * SCORE.building + bases * SCORE.base,
+    upgrades,
+    total: citizens * SCORE.citizen + buildings * SCORE.building + bases * SCORE.base + upgrades * SCORE.upgrade,
   };
 }
 
 export function siteAvailability(s: GameState, site: Site): string | null {
-  if (s.bases.some((b) => b.siteId === site.id)) return 'Este lugar ya está ocupado.';
-  const close = s.bases.some((b) => Math.hypot(b.x - site.x, b.y - site.y) < MIN_BASE_DISTANCE);
-  if (!close) return null;
-  const anyFar = s.map.sites.some(
-    (other) =>
-      !s.bases.some((b) => b.siteId === other.id) &&
-      !s.bases.some((b) => Math.hypot(b.x - other.x, b.y - other.y) < MIN_BASE_DISTANCE),
-  );
-  // Si ya no queda ningún lugar lejano, la distancia mínima deja de aplicarse.
-  return anyFar ? 'Está demasiado cerca de otra base.' : null;
+  const claimed = [...s.bases.map((b) => b.siteId), ...s.expeditions.map((e) => e.siteId)];
+  if (claimed.includes(site.id)) return 'Este lugar ya está ocupado.';
+  const tooClose = (other: Site) =>
+    claimed.some((id) => {
+      const taken = s.map.sites[id];
+      return Math.hypot(taken.x - other.x, taken.y - other.y) < MIN_BASE_DISTANCE;
+    });
+  if (!tooClose(site)) return null;
+  // En la selección inicial nadie puede quedarse sin lugar: ahí la distancia cede.
+  const anyFar = s.map.sites.some((other) => !claimed.includes(other.id) && !tooClose(other));
+  return s.phase.kind !== 'draft' || anyFar ? 'Está demasiado cerca de otra base.' : null;
 }
 
 function nodesInReach(s: GameState, base: Base): ResourceNode[] {
@@ -169,6 +200,8 @@ function nodesInReach(s: GameState, base: Base): ResourceNode[] {
 const JOB_NODE: Partial<Record<Job, ResourceNode['kind']>> = {
   wood: 'tree',
   stone: 'rock',
+  iron: 'iron',
+  gold: 'gold',
   food: 'bush',
   water: 'water',
 };
@@ -177,7 +210,7 @@ const JOB_SITE: Partial<Record<Job, BuildingType>> = { food: 'farm', water: 'wel
 const hasStock = (node: ResourceNode) => node.amount !== 0;
 
 export function hasSource(s: GameState, base: Base, job: Job): boolean {
-  if (job === 'build') return s.buildings.some((b) => b.baseId === base.id && !b.done);
+  if (job === 'build') return s.buildings.some((b) => b.baseId === base.id && needsWork(b));
   if (job === 'reproduce') return true;
   const site = JOB_SITE[job];
   if (site && s.buildings.some((b) => b.baseId === base.id && b.type === site && b.done)) return true;
@@ -204,7 +237,7 @@ export function ratesFor(s: GameState, player: number): Record<ResourceId, Resou
       let rate = 0;
       for (const c of s.citizens) {
         if (c.baseId !== base.id || c.job !== resource || !c.target) continue;
-        rate += (60 / secondsPerUnit(c)) * productivity;
+        rate += (60 / secondsPerUnit(s, c, base)) * productivity;
       }
       return { baseId: base.id, name: base.name, rate };
     });
@@ -214,30 +247,49 @@ export function ratesFor(s: GameState, player: number): Record<ResourceId, Resou
   return result;
 }
 
-function secondsPerUnit(c: Citizen): number {
+export const regionBonus = (s: GameState, base: Base, job: Job) =>
+  s.map.sites[base.siteId].specialty.includes(job) ? SPECIALTY_BONUS : 1;
+
+function secondsPerUnit(s: GameState, c: Citizen, base: Base): number {
+  if (c.job === 'idle' || c.job === 'build' || c.job === 'reproduce') return 1;
+  let time: number;
   if (c.job === 'food') {
-    const atFarm = c.target?.kind === 'building';
-    return atFarm ? WORK_SECONDS.farm : WORK_SECONDS.forage;
+    const target = c.target;
+    const farm = target?.kind === 'building' ? s.buildings.find((b) => b.id === target.id) : undefined;
+    time = !farm ? WORK_SECONDS.forage : farm.level > 1 ? FARM_UPGRADE_SECONDS : WORK_SECONDS.farm;
+  } else {
+    time = WORK_SECONDS[c.job];
   }
-  if (c.job === 'wood' || c.job === 'stone' || c.job === 'water') return WORK_SECONDS[c.job];
-  return 1;
+  return time / regionBonus(s, base, c.job);
 }
 
 // ---- Comandos --------------------------------------------------------------
 
 export function activePlayer(s: GameState): number | null {
   if (s.phase.kind === 'draft') return s.phase.order[s.phase.index];
-  if (s.phase.kind === 'decisions') return s.phase.player;
+  if (s.phase.kind === 'decisions' || s.phase.kind === 'trade') return s.phase.player;
   return null;
 }
 
 export function issue(s: GameState, player: number, cmd: Command): CommandResult {
+  // Responder ofertas es lo único que se puede hacer fuera del turno propio.
+  if (cmd.type === 'respond') return respond(s, player, cmd.offerId, cmd.accept);
+  if (cmd.type === 'counter') return counter(s, player, cmd.offerId, cmd.give, cmd.want);
   if (activePlayer(s) !== player) return { ok: false, error: 'No es tu turno.' };
   if (cmd.type === 'pickSite') return pickSite(s, player, cmd.siteId);
+  if (s.phase.kind === 'trade') {
+    if (cmd.type === 'endTurn') {
+      finishTrade(s);
+      return { ok: true };
+    }
+    if (cmd.type === 'propose') return propose(s, player, cmd.to, cmd.give, cmd.want);
+    if (cmd.type === 'market') return market(s, player, cmd.give, cmd.want);
+    return { ok: false, error: 'Durante el comercio no se pueden cambiar las órdenes.' };
+  }
   if (s.phase.kind !== 'decisions') return { ok: false, error: 'Todavía no empezó la partida.' };
   switch (cmd.type) {
     case 'endTurn':
-      nextTurn(s);
+      startTrade(s, player);
       return { ok: true };
     case 'setJob':
       return setJob(s, player, cmd.baseId, cmd.job, cmd.delta);
@@ -250,6 +302,12 @@ export function issue(s: GameState, player: number, cmd: Command): CommandResult
     }
     case 'build':
       return orderBuilding(s, player, cmd.baseId, cmd.building);
+    case 'upgrade':
+      return orderUpgrade(s, player, cmd.baseId, cmd.building);
+    case 'foundBase':
+      return foundBase(s, player, cmd.baseId, cmd.siteId);
+    default:
+      return { ok: false, error: 'Eso se hace en la fase de comercio.' };
   }
 }
 
@@ -260,21 +318,7 @@ function pickSite(s: GameState, player: number, siteId: number): CommandResult {
   const problem = siteAvailability(s, site);
   if (problem) return { ok: false, error: problem };
 
-  const base: Base = {
-    id: s.nextId++,
-    owner: player,
-    siteId,
-    name: site.name,
-    x: site.x,
-    y: site.y,
-    jobs: emptyJobs(),
-    effective: emptyJobs(),
-    autoSurvive: true,
-    crisis: { food: false, water: false },
-    reproProgress: 0,
-  };
-  s.bases.push(base);
-  for (let i = 0; i < START_CITIZENS; i++) addCitizen(s, base);
+  createBase(s, player, site, START_CITIZENS);
 
   s.phase.index++;
   if (s.phase.index >= s.phase.order.length) {
@@ -285,6 +329,25 @@ function pickSite(s: GameState, player: number, siteId: number): CommandResult {
     s.phase.botActAt = s.tick + seconds(1.5);
   }
   return { ok: true };
+}
+
+function createBase(s: GameState, player: number, site: Site, citizens: number): Base {
+  const base: Base = {
+    id: s.nextId++,
+    owner: player,
+    siteId: site.id,
+    name: site.name,
+    x: site.x,
+    y: site.y,
+    jobs: emptyJobs(),
+    effective: emptyJobs(),
+    autoSurvive: true,
+    crisis: { food: false, water: false },
+    reproProgress: 0,
+  };
+  s.bases.push(base);
+  for (let i = 0; i < citizens; i++) addCitizen(s, base);
+  return base;
 }
 
 function setJob(s: GameState, player: number, baseId: number, job: Job, delta: number): CommandResult {
@@ -300,8 +363,11 @@ function setJob(s: GameState, player: number, baseId: number, job: Job, delta: n
   return { ok: true };
 }
 
-export function missingFor(player: Player, type: BuildingType): { resource: ResourceId; amount: number }[] {
-  const cost = BUILDINGS[type].cost;
+export function missingFor(player: Player, type: BuildingType) {
+  return missingCost(player, BUILDINGS[type].cost);
+}
+
+export function missingCost(player: Player, cost: Stock): { resource: ResourceId; amount: number }[] {
   return RESOURCES.flatMap((resource) => {
     const need = cost[resource] ?? 0;
     const have = Math.floor(player.stock[resource]);
@@ -313,15 +379,12 @@ function orderBuilding(s: GameState, player: number, baseId: number, type: Build
   const base = s.bases.find((b) => b.id === baseId && b.owner === player);
   if (!base) return { ok: false, error: 'Esa base no es tuya.' };
   const owner = s.players[player];
-  const missing = missingFor(owner, type);
-  if (missing.length > 0) {
-    const first = missing[0];
-    return { ok: false, error: `Faltan ${first.amount} de ${RESOURCE_INFO[first.resource].name.toLowerCase()}.` };
-  }
+  const lacking = lackingError(missingFor(owner, type));
+  if (lacking) return lacking;
   const spot = findBuildSpot(s, base, type);
   if (!spot) return { ok: false, error: 'No queda espacio para construir en esta base.' };
   const info = BUILDINGS[type];
-  for (const resource of RESOURCES) owner.stock[resource] -= info.cost[resource] ?? 0;
+  pay(owner, info.cost);
   s.buildings.push({
     id: s.nextId++,
     type,
@@ -332,11 +395,81 @@ function orderBuilding(s: GameState, player: number, baseId: number, type: Build
     progress: 0,
     required: seconds(info.seconds),
     done: false,
+    level: 1,
+    upgrading: false,
     users: 0,
   });
   if (base.jobs.build === 0) {
     warn(s, `nobuilder:${base.id}`, player, `Asigná un constructor en ${base.name} para empezar la obra.`, 'warn', 20);
   }
+  return { ok: true };
+}
+
+function lackingError(missing: { resource: ResourceId; amount: number }[]): CommandResult | null {
+  if (missing.length === 0) return null;
+  const first = missing[0];
+  return { ok: false, error: `Faltan ${first.amount} de ${RESOURCE_INFO[first.resource].name.toLowerCase()}.` };
+}
+
+function pay(player: Player, cost: Stock) {
+  for (const resource of RESOURCES) player.stock[resource] -= cost[resource] ?? 0;
+}
+
+export const upgradable = (s: GameState, base: Base, type: BuildingType) =>
+  s.buildings.filter((b) => b.baseId === base.id && b.type === type && b.done && b.level === 1 && !b.upgrading);
+
+function orderUpgrade(s: GameState, player: number, baseId: number, type: BuildingType): CommandResult {
+  const base = s.bases.find((b) => b.id === baseId && b.owner === player);
+  if (!base) return { ok: false, error: 'Esa base no es tuya.' };
+  const building = upgradable(s, base, type)[0];
+  if (!building) return { ok: false, error: 'No hay edificios para mejorar.' };
+  const owner = s.players[player];
+  const info = UPGRADES[type];
+  const lacking = lackingError(missingCost(owner, info.cost));
+  if (lacking) return lacking;
+  pay(owner, info.cost);
+  building.upgrading = true;
+  building.progress = 0;
+  building.required = seconds(info.seconds);
+  if (base.jobs.build === 0) {
+    warn(s, `nobuilder:${base.id}`, player, `Asigná un constructor en ${base.name} para empezar la mejora.`, 'warn', 20);
+  }
+  return { ok: true };
+}
+
+function foundBase(s: GameState, player: number, baseId: number, siteId: number): CommandResult {
+  const origin = s.bases.find((b) => b.id === baseId && b.owner === player);
+  if (!origin) return { ok: false, error: 'Esa base no es tuya.' };
+  const site = s.map.sites[siteId];
+  if (!site) return { ok: false, error: 'Ese lugar no existe.' };
+  const problem = siteAvailability(s, site);
+  if (problem) return { ok: false, error: problem };
+  const owner = s.players[player];
+  const lacking = lackingError(missingCost(owner, EXPEDITION_COST));
+  if (lacking) return lacking;
+  const people = citizensOf(s, origin.id);
+  if (people.length <= EXPEDITION_SETTLERS) {
+    return { ok: false, error: `Hacen falta más de ${EXPEDITION_SETTLERS} ciudadanos en la base de origen.` };
+  }
+  const path = findPath(s.map, origin, site);
+  if (!path) return { ok: false, error: 'No hay camino por tierra hasta ese lugar.' };
+
+  pay(owner, EXPEDITION_COST);
+  const settlers = [...people]
+    .sort((a, b) => Number(b.job === 'idle') - Number(a.job === 'idle'))
+    .slice(0, EXPEDITION_SETTLERS);
+  s.citizens = s.citizens.filter((c) => !settlers.includes(c));
+  s.expeditions.push({
+    id: s.nextId++,
+    owner: player,
+    siteId,
+    settlers: EXPEDITION_SETTLERS,
+    path,
+    leg: 1,
+    x: origin.x,
+    y: origin.y,
+  });
+  refreshBase(s, origin);
   return { ok: true };
 }
 
@@ -371,8 +504,23 @@ function startTurn(s: GameState, player: number) {
   };
 }
 
+function startTrade(s: GameState, player: number) {
+  s.phase = {
+    kind: 'trade',
+    player,
+    endsAt: s.tick + seconds(TRADE_SECONDS),
+    botActAt: s.tick + seconds(1 + random(s) * 2),
+    acted: false,
+  };
+}
+
+function finishTrade(s: GameState) {
+  s.offers = [];
+  nextTurn(s);
+}
+
 function nextTurn(s: GameState) {
-  if (s.phase.kind !== 'decisions') return;
+  if (s.phase.kind !== 'decisions' && s.phase.kind !== 'trade') return;
   const from = s.phase.player;
   const count = s.players.length;
   for (let step = 1; step <= count; step++) {
@@ -406,7 +554,7 @@ function checkEliminations(s: GameState) {
     if (!player.alive || populationOf(s, player.id) > 0) continue;
     player.alive = false;
     say(s, null, `${player.name} se quedó sin ciudadanos.`, 'bad');
-    if (s.phase.kind === 'decisions' && s.phase.player === player.id) nextTurn(s);
+    if (activePlayer(s) === player.id) finishTrade(s);
   }
   if (s.phase.kind === 'over') return;
   const human = s.players.find((p) => !p.isBot);
@@ -431,7 +579,10 @@ export function tick(s: GameState) {
     return;
   }
 
-  if (s.tick >= s.phase.endsAt) nextTurn(s);
+  if (s.tick >= s.phase.endsAt) {
+    if (s.phase.kind === 'decisions') startTrade(s, s.phase.player);
+    else finishTrade(s);
+  }
   if ((s.phase.kind as string) === 'over') return;
 
   if (s.tick % TICKS_PER_SECOND === 0) {
@@ -449,6 +600,7 @@ export function tick(s: GameState) {
   }
 
   for (const c of s.citizens) stepCitizen(s, c);
+  for (const expedition of [...s.expeditions]) stepExpedition(s, expedition);
   for (const base of s.bases) stepReproduction(s, base);
   for (const player of s.players) if (player.alive) stepSurvival(s, player);
   if (s.tick % TICKS_PER_SECOND === 0) checkEliminations(s);
@@ -464,8 +616,8 @@ export function autoPick(s: GameState) {
 export function bestSite(s: GameState): Site | null {
   const open = s.map.sites.filter((site) => siteAvailability(s, site) === null);
   const value = (site: Site) => {
-    const { wood, stone, food, water } = site.stars;
-    return wood + stone + food + water + Math.min(water, 2) * 2 + Math.min(food, 3);
+    const { wood, stone, food, water, iron } = site.stars;
+    return wood + stone + food + water + Math.min(water, 2) * 2 + Math.min(food, 3) + Math.min(iron, 3) * 0.5;
   };
   return open.sort((a, b) => value(b) - value(a))[0] ?? null;
 }
@@ -573,13 +725,13 @@ function findTarget(s: GameState, c: Citizen, base: Base): (Target & Point) | nu
   };
 
   if (c.job === 'build') {
-    const site = nearest(s.buildings.filter((b) => b.baseId === base.id && !b.done));
+    const site = nearest(s.buildings.filter((b) => b.baseId === base.id && needsWork(b)));
     return site ? { kind: 'building', id: site.id, x: site.x, y: site.y } : null;
   }
   const type = c.job === 'idle' ? undefined : JOB_SITE[c.job];
   if (type) {
     const site = nearest(
-      s.buildings.filter((b) => b.baseId === base.id && b.type === type && b.done && b.users < WORKSITE_SLOTS),
+      s.buildings.filter((b) => b.baseId === base.id && b.type === type && b.done && b.users < slotsOf(b)),
     );
     // La granja rinde más que recolectar: siempre va primero.
     if (site && type === 'farm') {
@@ -641,10 +793,10 @@ function targetAlive(s: GameState, c: Citizen): boolean {
   if (target.kind === 'node') return hasStock(s.nodes[target.id]);
   const building = s.buildings.find((b) => b.id === target.id);
   if (!building) return false;
-  return c.job === 'build' ? !building.done : building.done;
+  return c.job === 'build' ? needsWork(building) : building.done;
 }
 
-function gain(s: GameState, player: Player, resource: ResourceId, amount: number) {
+export function gain(s: GameState, player: Player, resource: ResourceId, amount: number) {
   const cap = storageOf(s, player.id);
   const before = player.stock[resource];
   player.stock[resource] = Math.min(cap, before + amount);
@@ -704,8 +856,13 @@ function stepCitizen(s: GameState, c: Citizen) {
   const productivity = productivityOf(player);
   if (c.job === 'build') {
     const building = s.buildings.find((b) => b.id === c.target!.id)!;
-    building.progress += productivity;
-    if (building.progress >= building.required) {
+    building.progress += productivity * regionBonus(s, base, 'build');
+    if (building.progress < building.required) return;
+    if (building.upgrading) {
+      building.upgrading = false;
+      building.level = 2;
+      say(s, player.id, `${UPGRADES[building.type].name} lista en ${base.name}.`, 'good');
+    } else {
       building.done = true;
       say(s, player.id, `${BUILDINGS[building.type].name} terminada en ${base.name}.`, 'good');
     }
@@ -713,7 +870,7 @@ function stepCitizen(s: GameState, c: Citizen) {
   }
 
   c.progress += productivity;
-  if (c.progress < seconds(secondsPerUnit(c))) return;
+  if (c.progress < seconds(secondsPerUnit(s, c, base))) return;
   c.progress = 0;
   const resource = c.job;
   if (c.target?.kind === 'node') {
@@ -727,11 +884,34 @@ function reportNoSource(s: GameState, base: Base, job: Job) {
   const messages: Partial<Record<Job, string>> = {
     wood: `No quedan árboles disponibles cerca de la ${base.name}.`,
     stone: `No quedan rocas disponibles cerca de la ${base.name}.`,
+    iron: `No hay hierro cerca de la ${base.name}.`,
+    gold: `No hay oro cerca de la ${base.name}.`,
     food: `No queda comida silvestre cerca de la ${base.name}. Construí una granja.`,
     water: `No hay agua cerca de la ${base.name}. Construí un pozo.`,
   };
   const text = messages[job];
   if (text && !hasSource(s, base, job)) warn(s, `nosource:${base.id}:${job}`, base.owner, text, 'warn', 40);
+}
+
+function stepExpedition(s: GameState, e: Expedition) {
+  let step = WALK_SPEED / TICKS_PER_SECOND;
+  while (step > 0 && e.leg < e.path.length) {
+    const goal = e.path[e.leg];
+    const distance = Math.hypot(goal.x - e.x, goal.y - e.y);
+    if (distance > step) {
+      e.x += ((goal.x - e.x) / distance) * step;
+      e.y += ((goal.y - e.y) / distance) * step;
+      return;
+    }
+    e.x = goal.x;
+    e.y = goal.y;
+    step -= distance;
+    e.leg++;
+  }
+  s.expeditions.splice(s.expeditions.indexOf(e), 1);
+  const site = s.map.sites[e.siteId];
+  createBase(s, e.owner, site, e.settlers);
+  say(s, e.owner, `La expedición fundó la ${site.name}.`, 'good');
 }
 
 export type ReproStatus = 'idle' | 'running' | 'need_two' | 'no_housing' | 'no_supplies' | 'cap';
@@ -778,6 +958,7 @@ function stepSurvival(s: GameState, player: Player) {
 }
 
 function warnAboutShortage(s: GameState, player: Player) {
+  warnAboutDepletion(s, player);
   const rates = ratesFor(s, player.id);
   for (const resource of ['food', 'water'] as const) {
     const label = RESOURCE_INFO[resource].name.toLowerCase();
@@ -792,6 +973,67 @@ function warnAboutShortage(s: GameState, player: Player) {
       }
     }
   }
+}
+
+const LOW_NODES = 0.15;
+
+/** Parte de lo que había cerca de una base que todavía queda. */
+function remainingShare(s: GameState, base: Base, kind: ResourceNode['kind']): number {
+  let left = 0;
+  let total = 0;
+  for (const id of s.map.sites[base.siteId].nodeIds) {
+    if (s.nodes[id].kind !== kind) continue;
+    left += s.nodes[id].amount;
+    total += s.nodes[id].max;
+  }
+  return total > 0 ? left / total : 1;
+}
+
+function warnAboutDepletion(s: GameState, player: Player) {
+  for (const alert of alertsFor(s, player.id)) {
+    if (alert.key.startsWith('low-')) warn(s, `${alert.key}:${player.id}`, player.id, alert.text, 'warn', 120);
+  }
+}
+
+export interface Alert {
+  key: string;
+  text: string;
+  level: 'warn' | 'bad';
+}
+
+/** Problemas actuales de un jugador, para mostrarlos sin que tenga que buscarlos. */
+export function alertsFor(s: GameState, playerId: number): Alert[] {
+  const alerts: Alert[] = [];
+  const player = s.players[playerId];
+  const rates = ratesFor(s, playerId);
+  for (const resource of ['food', 'water'] as const) {
+    const name = RESOURCE_INFO[resource].name;
+    const net = rates[resource].net;
+    if (player.stock[resource] <= 0) {
+      alerts.push({ key: `empty-${resource}`, text: `${name}: agotada`, level: 'bad' });
+    } else if (net < 0 && (player.stock[resource] / -net) * 60 <= 120) {
+      const left = Math.round((player.stock[resource] / -net) * 60);
+      alerts.push({ key: `short-${resource}`, text: `${name}: ${left} s`, level: 'warn' });
+    }
+  }
+  for (const base of basesOf(s, playerId)) {
+    for (const job of ['wood', 'stone', 'iron', 'gold', 'food'] as const) {
+      if (base.effective[job] === 0) continue;
+      const share = remainingShare(s, base, JOB_NODE[job]!);
+      if (share > 0 && share < LOW_NODES) {
+        const name = RESOURCE_INFO[job].name.toLowerCase();
+        alerts.push({ key: `low-${job}-${base.id}`, text: `${base.name}: queda poca ${name}`, level: 'warn' });
+      }
+    }
+    if (reproductionStatus(s, base) === 'no_housing') {
+      alerts.push({ key: `housing-${base.id}`, text: `${base.name}: sin vivienda`, level: 'warn' });
+    }
+    const unbuilt = s.buildings.some((b) => b.baseId === base.id && needsWork(b));
+    if (unbuilt && base.effective.build === 0) {
+      alerts.push({ key: `builder-${base.id}`, text: `${base.name}: obra sin constructor`, level: 'warn' });
+    }
+  }
+  return alerts;
 }
 
 function killOne(s: GameState, player: Player) {

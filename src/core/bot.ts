@@ -1,21 +1,43 @@
-import { BIRTH_COST, CONSUMPTION_PER_MIN, JOBS, REPRODUCTION_SECONDS, WORK_SECONDS } from './config';
+import {
+  BIRTH_COST,
+  BUILDINGS,
+  CONSUMPTION_PER_MIN,
+  EXPEDITION_COST,
+  JOBS,
+  MARKET_VALUE,
+  REPRODUCTION_SECONDS,
+  RESOURCES,
+  UPGRADES,
+  WORK_SECONDS,
+} from './config';
 import {
   basesOf,
+  bestSite,
   capacityOf,
   citizensOf,
+  emptyJobs,
   hasSource,
   issue,
+  missingCost,
   missingFor,
+  needsWork,
   populationOf,
+  random,
   storageOf,
+  upgradable,
 } from './game';
-import type { Base, BuildingType, GameState, Job, Player } from './types';
+import { canPay, marketPrice } from './trade';
+import type { Base, BuildingType, GameState, Job, Offer, Player, ResourceId, Stock } from './types';
+
+const MAX_BASES = 5;
+const VITAL_RESERVE = 18;
 
 /** Decide un turno completo usando solo comandos normales. */
 export function playBotTurn(s: GameState, player: number) {
   const owner = s.players[player];
   const bases = basesOf(s, player);
   planBuildings(s, owner, bases);
+  planExpansion(s, owner, basesOf(s, player));
   assignWorkers(s, owner, bases);
   issue(s, player, { type: 'endTurn' });
 }
@@ -38,8 +60,33 @@ function planBuildings(s: GameState, owner: Player, bases: Base[]) {
 
   const cap = storageOf(s, owner.id);
   const full = owner.stock.wood > cap * 0.85 || owner.stock.stone > cap * 0.85;
-  const main = [...bases].sort((a, b) => citizensOf(s, b.id).length - citizensOf(s, a.id).length)[0];
+  const main = largestFirst(s, bases)[0];
   if (full && main && !pending('depot')) order(main, 'depot');
+
+  for (const base of bases) {
+    for (const type of Object.keys(BUILDINGS) as BuildingType[]) {
+      const affordable = missingCost(owner, UPGRADES[type].cost).length === 0;
+      if (!affordable || upgradable(s, base, type).length === 0) continue;
+      if (owner.stock.wood < 40 || owner.stock.stone < 20) continue;
+      issue(s, owner.id, { type: 'upgrade', baseId: base.id, building: type });
+      break;
+    }
+  }
+}
+
+function planExpansion(s: GameState, owner: Player, bases: Base[]) {
+  const travelling = s.expeditions.some((e) => e.owner === owner.id);
+  if (travelling || bases.length >= MAX_BASES || populationOf(s, owner.id) < 12) return;
+  if (missingCost(owner, EXPEDITION_COST).length > 0) return;
+  const origin = largestFirst(s, bases)[0];
+  const site = bestSite(s);
+  if (origin && site && citizensOf(s, origin.id).length >= 6) {
+    issue(s, owner.id, { type: 'foundBase', baseId: origin.id, siteId: site.id });
+  }
+}
+
+function largestFirst(s: GameState, bases: Base[]) {
+  return [...bases].sort((a, b) => citizensOf(s, b.id).length - citizensOf(s, a.id).length);
 }
 
 function assignWorkers(s: GameState, owner: Player, bases: Base[]) {
@@ -56,10 +103,9 @@ function assignWorkers(s: GameState, owner: Player, bases: Base[]) {
   let waterLeft = feed(BIRTH_COST.water, perWater);
 
   // La base más grande carga con la supervivencia; así la chica puede crecer.
-  const largestFirst = [...bases].sort((a, b) => citizensOf(s, b.id).length - citizensOf(s, a.id).length);
-  for (const base of largestFirst) {
+  for (const base of largestFirst(s, bases)) {
     const population = citizensOf(s, base.id).length;
-    const want: Record<Job, number> = { wood: 0, stone: 0, food: 0, water: 0, build: 0, reproduce: 0 };
+    const want = emptyJobs();
     let free = population;
 
     const take = (job: Job, amount: number) => {
@@ -76,7 +122,9 @@ function assignWorkers(s: GameState, owner: Player, bases: Base[]) {
     if (room && free >= 2 && owner.stock.food > 20 && owner.stock.water > 20) {
       take('reproduce', population >= 10 ? 4 : 2);
     }
-    if (s.buildings.some((b) => b.baseId === base.id && !b.done)) take('build', population >= 6 ? 2 : 1);
+    if (s.buildings.some((b) => b.baseId === base.id && needsWork(b))) take('build', population >= 6 ? 2 : 1);
+    if (population >= 8 && hasSource(s, base, 'iron')) take('iron', population >= 14 ? 2 : 1);
+    if (population >= 10 && hasSource(s, base, 'gold')) take('gold', 1);
 
     const woodFirst = owner.stock.wood <= owner.stock.stone * 1.6;
     const order: Job[] = woodFirst ? ['wood', 'stone'] : ['stone', 'wood'];
@@ -104,4 +152,87 @@ function applyJobs(s: GameState, owner: Player, base: Base, want: Record<Job, nu
     const delta = want[job] - base.jobs[job];
     if (delta > 0) issue(s, owner.id, { type: 'setJob', baseId: base.id, job, delta });
   }
+}
+
+// ---- Comercio --------------------------------------------------------------
+
+/** Lo que vale un recurso para este bot: lo escaso vale más que lo que le sobra. */
+function worth(owner: Player, resource: ResourceId): number {
+  const stock = owner.stock[resource];
+  const scarcity = stock < 25 ? 2 : stock < 60 ? 1.3 : stock > 180 ? 0.6 : 1;
+  return MARKET_VALUE[resource] * scarcity;
+}
+
+const valueOf = (owner: Player, stock: Stock) =>
+  RESOURCES.reduce((sum, resource) => sum + (stock[resource] ?? 0) * worth(owner, resource), 0);
+
+function keepsReserve(owner: Player, pay: Stock) {
+  return (['food', 'water'] as const).every(
+    (resource) => (pay[resource] ?? 0) === 0 || owner.stock[resource] - (pay[resource] ?? 0) >= VITAL_RESERVE,
+  );
+}
+
+function answerOffer(s: GameState, owner: Player, offer: Offer) {
+  const received = valueOf(owner, offer.give);
+  const paid = valueOf(owner, offer.want);
+  const affordable = canPay(owner, offer.want) && keepsReserve(owner, offer.want);
+  if (affordable && received >= paid * 1.1) {
+    issue(s, owner.id, { type: 'respond', offerId: offer.id, accept: true });
+    return;
+  }
+  // Regatea una sola vez: una contraoferta nunca recibe otra contraoferta.
+  const ratio = received / paid / 1.1;
+  if (affordable && offer.counterOf === null && ratio >= 0.55) {
+    const give: Stock = {};
+    for (const resource of RESOURCES) {
+      const amount = Math.floor((offer.want[resource] ?? 0) * ratio);
+      if (amount > 0) give[resource] = amount;
+    }
+    if (Object.keys(give).length > 0) {
+      issue(s, owner.id, { type: 'counter', offerId: offer.id, give, want: offer.give });
+      return;
+    }
+  }
+  issue(s, owner.id, { type: 'respond', offerId: offer.id, accept: false });
+}
+
+function tradeTurn(s: GameState, owner: Player) {
+  const hungry = (['food', 'water'] as const).find((resource) => owner.stock[resource] < 15);
+  const richest = RESOURCES.filter((r) => r !== 'food' && r !== 'water').sort(
+    (a, b) => owner.stock[b] * MARKET_VALUE[b] - owner.stock[a] * MARKET_VALUE[a],
+  )[0];
+  if (hungry && owner.stock[richest] >= marketPrice(richest, hungry)) {
+    issue(s, owner.id, { type: 'market', give: richest, want: hungry });
+  }
+
+  const basics: ResourceId[] = populationOf(s, owner.id) >= 10 ? ['wood', 'stone', 'iron', 'water', 'food'] : ['wood', 'stone', 'water', 'food'];
+  const need = [...basics].sort((a, b) => owner.stock[a] - owner.stock[b])[0];
+  const surplus = RESOURCES.filter((r) => r !== need && r !== 'gold').sort((a, b) => owner.stock[b] - owner.stock[a])[0];
+  if (owner.stock[need] >= 45 || owner.stock[surplus] < 60 || random(s) > 0.6) return;
+  const want = need === 'iron' ? 6 : 15;
+  const give = Math.ceil(((want * MARKET_VALUE[need]) / MARKET_VALUE[surplus]) * 1.2);
+  issue(s, owner.id, { type: 'propose', to: null, give: { [surplus]: give }, want: { [need]: want } });
+}
+
+/** Un tick de la fase de comercio para los jugadores que maneja la máquina. */
+export function stepBotTrade(s: GameState) {
+  if (s.phase.kind !== 'trade') return;
+  for (const offer of [...s.offers]) {
+    if (offer.status !== 'open' || s.tick < offer.respondAt) continue;
+    for (const key of Object.keys(offer.responses)) {
+      const player = s.players[Number(key)];
+      if (player.isBot && offer.status === 'open' && offer.responses[player.id] === 'pending') {
+        answerOffer(s, player, offer);
+      }
+    }
+  }
+
+  const phase = s.phase;
+  const active = s.players[phase.player];
+  if (!active.isBot || s.tick < phase.botActAt) return;
+  if (!phase.acted) {
+    phase.acted = true;
+    tradeTurn(s, active);
+  }
+  if (!s.offers.some((o) => o.status === 'open')) issue(s, active.id, { type: 'endTurn' });
 }

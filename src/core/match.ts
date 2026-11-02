@@ -1,4 +1,4 @@
-import { playBotTurn } from './bot';
+import { playBotTurn, stepBotTrade } from './bot';
 import { autoPick, tick } from './game';
 import type { GameState } from './types';
 
@@ -10,5 +10,7 @@ export function stepMatch(s: GameState) {
     if (s.players[phase.order[phase.index]].isBot && s.tick >= phase.botActAt) autoPick(s);
   } else if (phase.kind === 'decisions') {
     if (s.players[phase.player].isBot && s.tick >= phase.botActAt) playBotTurn(s, phase.player);
+  } else if (phase.kind === 'trade') {
+    stepBotTrade(s);
   }
 }

@@ -1,7 +1,8 @@
-export type ResourceId = 'wood' | 'stone' | 'food' | 'water';
-export type Job = 'wood' | 'stone' | 'food' | 'water' | 'build' | 'reproduce';
+export type ResourceId = 'wood' | 'stone' | 'iron' | 'gold' | 'food' | 'water';
+export type Stock = Partial<Record<ResourceId, number>>;
+export type Job = ResourceId | 'build' | 'reproduce';
 export type BuildingType = 'house' | 'farm' | 'well' | 'depot';
-export type NodeKind = 'tree' | 'rock' | 'bush' | 'water';
+export type NodeKind = 'tree' | 'rock' | 'bush' | 'water' | 'iron' | 'gold';
 export type Biome = 'forest' | 'mountain' | 'plains' | 'meadow' | 'fertile' | 'rocky';
 
 export const enum Terrain {
@@ -37,6 +38,7 @@ export interface Site extends Point {
   id: number;
   name: string;
   biome: Biome;
+  specialty: Job[];
   nodeIds: number[];
   stars: Record<ResourceId, number>;
   advantage: string;
@@ -88,7 +90,33 @@ export interface Building extends Point {
   progress: number;
   required: number;
   done: boolean;
+  level: number;
+  upgrading: boolean;
   users: number;
+}
+
+/** Ciudadanos en camino a fundar una base. No pertenecen a ninguna base mientras viajan. */
+export interface Expedition extends Point {
+  id: number;
+  owner: number;
+  siteId: number;
+  settlers: number;
+  path: Point[];
+  leg: number;
+}
+
+export interface Offer {
+  id: number;
+  from: number;
+  /** null significa todos. */
+  to: number | null;
+  give: Stock;
+  want: Stock;
+  status: 'open' | 'accepted' | 'rejected';
+  responses: Record<number, 'pending' | 'rejected'>;
+  acceptedBy: number | null;
+  counterOf: number | null;
+  respondAt: number;
 }
 
 export type Target = { kind: 'node'; id: number } | { kind: 'building'; id: number };
@@ -110,6 +138,7 @@ export interface Citizen extends Point {
 export type Phase =
   | { kind: 'draft'; order: number[]; index: number; endsAt: number; botActAt: number }
   | { kind: 'decisions'; player: number; endsAt: number; botActAt: number }
+  | { kind: 'trade'; player: number; endsAt: number; botActAt: number; acted: boolean }
   | { kind: 'over'; winner: number | null; reason: string };
 
 export type ToastLevel = 'info' | 'warn' | 'bad' | 'good';
@@ -131,6 +160,8 @@ export interface GameState {
   bases: Base[];
   citizens: Citizen[];
   buildings: Building[];
+  expeditions: Expedition[];
+  offers: Offer[];
   events: GameEvent[];
   warned: Record<string, number>;
   nextId: number;
@@ -141,6 +172,12 @@ export type Command =
   | { type: 'setJob'; baseId: number; job: Job; delta: number }
   | { type: 'setAutoSurvive'; baseId: number; value: boolean }
   | { type: 'build'; baseId: number; building: BuildingType }
+  | { type: 'upgrade'; baseId: number; building: BuildingType }
+  | { type: 'foundBase'; baseId: number; siteId: number }
+  | { type: 'propose'; to: number | null; give: Stock; want: Stock }
+  | { type: 'respond'; offerId: number; accept: boolean }
+  | { type: 'counter'; offerId: number; give: Stock; want: Stock }
+  | { type: 'market'; give: ResourceId; want: ResourceId }
   | { type: 'endTurn' };
 
 export type CommandResult = { ok: true } | { ok: false; error: string };
