@@ -9,9 +9,12 @@ import {
   MAX_POPULATION,
   RESOURCES,
   RESOURCE_INFO,
+  SOLDIERS,
   SPECIALTY_BONUS,
+  STANCE_INFO,
   TICKS_PER_SECOND,
   TOTAL_ROUNDS,
+  TRUCE_ROUNDS,
   UPGRADES,
   seconds,
 } from '../core/config';
@@ -35,7 +38,24 @@ import {
   upgradable,
 } from '../core/game';
 import { canPay, marketPrice, suggestTrade } from '../core/trade';
-import type { Base, BuildingType, Command, GameState, Job, Offer, ResourceId, Site, Stock } from '../core/types';
+import { destinationOf, estimateEta, etaOf, freeWallSlot, soldiersOf, troopCount, wallSlots, wallsOf } from '../core/war';
+import type {
+  Army,
+  ArmyOrder,
+  Base,
+  BuildingType,
+  Command,
+  GameState,
+  Job,
+  Offer,
+  Point,
+  ResourceId,
+  Site,
+  SoldierKind,
+  Stance,
+  Stock,
+} from '../core/types';
+import { MAP_HEIGHT, MAP_WIDTH, toScreen, toWorld } from '../render/iso';
 import { patch } from './patch';
 
 export const ME = 0;
@@ -59,7 +79,18 @@ const REPRO_TEXT = {
   cap: `Llegaste al máximo de ${MAX_POPULATION}.`,
 };
 
-type Tab = 'jobs' | 'build' | 'upgrades';
+type Tab = 'jobs' | 'build' | 'upgrades' | 'army';
+
+type PickTarget = { kind: 'base'; id: number } | { kind: 'army'; id: number } | ({ kind: 'point' } & Point);
+
+/** Tropas que esperan destino: salen de una base o ya están en el mapa. */
+interface Sending {
+  baseId: number | null;
+  armyId: number | null;
+  target: PickTarget | null;
+}
+
+const MINIMAP_WIDTH = 150;
 
 interface TradeForm {
   give: Stock;
@@ -75,6 +106,8 @@ export class Hud {
   selectedSite: number | null = null;
   /** Base de origen mientras se elige dónde fundar una nueva. */
   expanding: number | null = null;
+  selectedArmy: number | null = null;
+  sending: Sending | null = null;
 
   private tab: Tab = 'jobs';
   private openResource: ResourceId | null = null;
@@ -84,6 +117,10 @@ export class Hud {
   private form = emptyForm();
   private marketGive: ResourceId = 'wood';
   private marketWant: ResourceId = 'stone';
+  private sendCommon = 0;
+  private sendHeavy = 0;
+  private minimapLand: HTMLCanvasElement | null = null;
+  private nextMinimap = 0;
 
   private top: HTMLElement;
   private panel: HTMLElement;
@@ -91,17 +128,19 @@ export class Hud {
   private toasts: HTMLElement;
   private banner: HTMLElement;
   private overlay: HTMLElement;
+  private minimap: HTMLCanvasElement;
 
   constructor(
     root: HTMLElement,
     private state: GameState,
     private onRestart: () => void,
-    private onFocusBase: (base: Base) => void,
+    private onFocus: (point: Point) => void,
   ) {
     root.innerHTML = `
       <div id="top"></div>
       <div id="panel"></div>
       <div id="offers"></div>
+      <canvas id="minimap" aria-label="Minimapa"></canvas>
       <div id="toasts"></div>
       <div id="banner"></div>
       <div id="overlay"></div>`;
@@ -111,6 +150,8 @@ export class Hud {
     this.toasts = root.querySelector('#toasts')!;
     this.banner = root.querySelector('#banner')!;
     this.overlay = root.querySelector('#overlay')!;
+    this.minimap = root.querySelector('#minimap')!;
+    this.minimap.addEventListener('click', (event) => this.tapMinimap(event));
     root.addEventListener('click', (event) => this.handleClick(event));
     root.addEventListener('change', (event) => this.handleChange(event));
   }
@@ -118,6 +159,12 @@ export class Hud {
   tapBase(id: number) {
     const base = this.state.bases.find((b) => b.id === id);
     if (!base || this.expanding !== null) return;
+    if (this.sending) {
+      this.sending.target = { kind: 'base', id };
+      this.render();
+      return;
+    }
+    this.selectedArmy = null;
     this.selectedBase = base.owner === ME ? id : null;
     this.openResource = null;
     this.render();
@@ -128,7 +175,26 @@ export class Hud {
     this.render();
   }
 
-  tapEmpty() {
+  tapArmy(id: number) {
+    if (this.expanding !== null) return;
+    const army = this.state.armies.find((a) => a.id === id);
+    if (this.sending) {
+      if (army?.owner !== ME) this.sending.target = { kind: 'army', id };
+      this.render();
+      return;
+    }
+    this.selectedArmy = id;
+    this.selectedBase = null;
+    this.render();
+  }
+
+  tapEmpty(point: Point) {
+    if (this.sending) {
+      this.sending.target = { kind: 'point', x: point.x, y: point.y };
+      this.render();
+      return;
+    }
+    this.selectedArmy = null;
     if (this.expanding === null) this.selectedBase = null;
     this.selectedSite = null;
     this.openResource = null;
@@ -138,6 +204,10 @@ export class Hud {
   frame() {
     this.drainEvents();
     const now = performance.now();
+    if (now >= this.nextMinimap) {
+      this.nextMinimap = now + 400;
+      this.drawMinimap();
+    }
     if (now < this.nextRender) return;
     this.nextRender = now + 180;
     this.render();
@@ -172,6 +242,10 @@ export class Hud {
         break;
       case 'close':
         this.selectedBase = null;
+        this.render();
+        break;
+      case 'close-army':
+        this.selectedArmy = null;
         this.render();
         break;
       case 'auto':
@@ -228,7 +302,7 @@ export class Hud {
         const target = this.state.bases.find((b) => b.id === Number(base));
         if (target) {
           this.selectedBase = target.id;
-          this.onFocusBase(target);
+          this.onFocus(target);
           this.render();
         }
         break;
@@ -236,6 +310,52 @@ export class Hud {
       case 'restart':
         this.onRestart();
         break;
+      case 'focus-army': {
+        const army = this.state.armies.find((a) => a.id === Number(element.dataset.army));
+        if (army) {
+          this.selectedArmy = army.id;
+          this.selectedBase = null;
+          this.onFocus(army);
+          this.render();
+        }
+        break;
+      }
+      case 'train':
+        if (baseId !== null) this.send({ type: 'train', baseId, kind: type as SoldierKind });
+        break;
+      case 'stance':
+        if (baseId !== null) this.send({ type: 'setStance', baseId, stance: type as Stance });
+        break;
+      case 'troops': {
+        const base2 = this.state.bases.find((b) => b.id === baseId);
+        if (base2) {
+          const change = Number(delta);
+          if (type === 'common') this.sendCommon = Math.max(0, Math.min(base2.garrison.common, this.sendCommon + change));
+          else this.sendHeavy = Math.max(0, Math.min(base2.garrison.heavy, this.sendHeavy + change));
+          this.render();
+        }
+        break;
+      }
+      case 'choose-target':
+        this.sending = { baseId, armyId: null, target: null };
+        this.render();
+        break;
+      case 'redirect':
+        this.sending = { baseId: null, armyId: this.selectedArmy, target: null };
+        this.render();
+        break;
+      case 'cancel-send':
+        this.sending = null;
+        this.render();
+        break;
+      case 'retreat':
+        if (this.selectedArmy !== null) this.send({ type: 'retreat', armyId: this.selectedArmy });
+        break;
+      case 'order': {
+        const order = this.orderFor(element.dataset.order ?? '');
+        if (order) this.dispatchOrder(order);
+        break;
+      }
       case 'amount': {
         const stock = side === 'give' ? this.form.give : this.form.want;
         const id = resource as ResourceId;
@@ -283,6 +403,98 @@ export class Hud {
     }
   }
 
+  private orderFor(name: string): ArmyOrder | null {
+    const target = this.sending?.target;
+    if (!target) return null;
+    if (target.kind === 'point') return { kind: 'hold', x: target.x, y: target.y };
+    if (target.kind === 'army') return { kind: 'chase', armyId: target.id };
+    if (name === 'move') return { kind: 'move', baseId: target.id };
+    return { kind: 'attack', baseId: target.id, mode: name === 'raid' ? 'raid' : 'conquer' };
+  }
+
+  private dispatchOrder(order: ArmyOrder) {
+    const sending = this.sending;
+    if (!sending) return;
+    const sent =
+      sending.armyId !== null
+        ? this.send({ type: 'orderArmy', armyId: sending.armyId, order })
+        : this.send({ type: 'sendArmy', baseId: sending.baseId!, common: this.sendCommon, heavy: this.sendHeavy, order });
+    if (sent) {
+      this.sending = null;
+      this.sendCommon = 0;
+      this.sendHeavy = 0;
+      this.render();
+    }
+  }
+
+  private tapMinimap(event: MouseEvent) {
+    const rect = this.minimap.getBoundingClientRect();
+    const ratio = MAP_WIDTH / rect.width;
+    const world = toWorld((event.clientX - rect.left) * ratio, (event.clientY - rect.top) * ratio);
+    this.onFocus(world);
+  }
+
+  private drawMinimap() {
+    const s = this.state;
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.round(MINIMAP_WIDTH * ratio);
+    const height = Math.round((width * MAP_HEIGHT) / MAP_WIDTH);
+    if (this.minimap.width !== width) {
+      this.minimap.width = width;
+      this.minimap.height = height;
+      this.minimapLand = null;
+    }
+    const scale = width / MAP_WIDTH;
+    const at = (p: Point) => {
+      const screen = toScreen(p.x, p.y);
+      return { x: screen.x * scale, y: screen.y * scale };
+    };
+    if (!this.minimapLand) {
+      const land = document.createElement('canvas');
+      land.width = width;
+      land.height = height;
+      const paint = land.getContext('2d')!;
+      paint.fillStyle = '#8fbf6a';
+      const { grid, cell, terrain } = s.map;
+      const dot = Math.ceil(cell * 3 * scale * 1.5);
+      for (let cy = 0; cy < grid; cy += 3) {
+        for (let cx = 0; cx < grid; cx += 3) {
+          if (terrain[cx + cy * grid] < 3) continue;
+          const p = at({ x: (cx + 0.5) * cell, y: (cy + 0.5) * cell });
+          paint.fillRect(p.x, p.y, dot, dot);
+        }
+      }
+      this.minimapLand = land;
+    }
+    const c = this.minimap.getContext('2d')!;
+    c.clearRect(0, 0, width, height);
+    c.drawImage(this.minimapLand, 0, 0);
+    for (const base of s.bases) {
+      const p = at(base);
+      c.fillStyle = hex(s.players[base.owner].color);
+      c.strokeStyle = '#fff';
+      c.lineWidth = ratio;
+      c.beginPath();
+      c.arc(p.x, p.y, 4 * ratio, 0, Math.PI * 2);
+      c.fill();
+      c.stroke();
+    }
+    for (const army of s.armies) {
+      const p = at(army);
+      const size = 6 * ratio;
+      c.fillStyle = hex(s.players[army.owner].color);
+      c.strokeStyle = army.owner === ME ? '#fff' : '#ff3b2f';
+      c.lineWidth = 1.5 * ratio;
+      c.beginPath();
+      c.moveTo(p.x, p.y - size / 1.5);
+      c.lineTo(p.x + size / 1.5, p.y + size / 2);
+      c.lineTo(p.x - size / 1.5, p.y + size / 2);
+      c.closePath();
+      c.fill();
+      c.stroke();
+    }
+  }
+
   private submitOffer() {
     const { give, want, to, counterOf } = this.form;
     const sent =
@@ -315,7 +527,11 @@ export class Hud {
   private render() {
     const s = this.state;
     this.announceTurn(s);
-    if (s.phase.kind !== 'decisions') this.expanding = null;
+    if (s.phase.kind !== 'decisions') {
+      this.expanding = null;
+      this.sending = null;
+    }
+    this.minimap.style.display = s.phase.kind === 'draft' ? 'none' : '';
     if (this.form.counterOf !== null && !this.pendingOffers(s).some((o) => o.id === this.form.counterOf)) {
       this.form = emptyForm();
     }
@@ -412,7 +628,11 @@ export class Hud {
     const alerts = alertsFor(s, ME).slice(0, 3);
     if (alerts.length === 0) return '';
     return `<div class="alerts">${alerts
-      .map((alert) => `<span class="alert ${alert.level}">⚠ ${alert.text}</span>`)
+      .map((alert) =>
+        alert.armyId !== undefined
+          ? `<button class="alert ${alert.level}" data-act="focus-army" data-army="${alert.armyId}">⚔ ${alert.text}</button>`
+          : `<span class="alert ${alert.level}">⚠ ${alert.text}</span>`,
+      )
       .join('')}</div>`;
   }
 
@@ -434,6 +654,8 @@ export class Hud {
       if (active === ME) text = 'Tocá un círculo del mapa para ver qué recursos tiene ese lugar.';
     } else if (this.expanding !== null) {
       text = 'Tocá un círculo del mapa para elegir el destino.';
+    } else if (this.sending && !this.sending.target) {
+      text = 'Tocá una base, un ejército enemigo o un punto del mapa.';
     } else if (s.phase.kind === 'decisions' && s.round === 1 && active === ME && this.selectedBase === null) {
       const assigned = s.bases.some((b) => b.owner === ME && assignedTotal(b) > 0);
       text = assigned
@@ -482,10 +704,16 @@ export class Hud {
       return site ? this.siteHtml(s, site) : '';
     }
     if (this.expanding !== null) return this.expansionHtml(s);
+    if (this.sending) return this.sendingHtml(s, this.sending);
     const trading = s.phase.kind === 'trade' && activePlayer(s) === ME;
     if (trading || this.form.counterOf !== null) return this.tradeHtml(s);
+    if (this.selectedArmy !== null) {
+      const army = s.armies.find((a) => a.id === this.selectedArmy);
+      if (army) return this.armyInfoHtml(s, army);
+      this.selectedArmy = null;
+    }
     if (this.selectedBase === null) return '';
-    const base = s.bases.find((b) => b.id === this.selectedBase);
+    const base = s.bases.find((b) => b.id === this.selectedBase && b.owner === ME);
     return base ? this.baseHtml(s, base) : '';
   }
 
@@ -541,8 +769,8 @@ export class Hud {
     const capacity = capacityOf(s, base);
     const free = population - assignedTotal(base);
     const myTurn = activePlayer(s) === ME && s.phase.kind === 'decisions';
-    const labels: Record<Tab, string> = { jobs: 'Trabajos', build: 'Construir', upgrades: 'Mejoras' };
-    const tabs = (['jobs', 'build', 'upgrades'] as Tab[])
+    const labels: Record<Tab, string> = { jobs: 'Trabajos', build: 'Construir', upgrades: 'Mejoras', army: 'Ejército' };
+    const tabs = (['jobs', 'build', 'upgrades', 'army'] as Tab[])
       .map(
         (tab) =>
           `<button class="tab${this.tab === tab ? ' on' : ''}" data-act="tab" data-tab="${tab}">${labels[tab]}</button>`,
@@ -553,7 +781,9 @@ export class Hud {
         ? this.jobsHtml(s, base, free, myTurn)
         : this.tab === 'build'
           ? this.buildHtml(s, base, myTurn)
-          : this.upgradesHtml(s, base, myTurn);
+          : this.tab === 'upgrades'
+            ? this.upgradesHtml(s, base, myTurn)
+            : this.armyHtml(s, base, myTurn);
     return `<header>
         <h3>${base.name}</h3>
         <button class="x" data-act="close" aria-label="Cerrar">✕</button>
@@ -561,6 +791,7 @@ export class Hud {
       <div class="stats">
         <span>Población <b>${population} / ${capacity}</b></span>
         <span>Libres <b>${free}</b></span>
+        <span>⚔ <b>${troopCount(base.garrison)}</b></span>
       </div>
       <div class="specialty">${this.specialtyText(s.map.sites[base.siteId])}</div>
       ${myTurn ? '' : '<div class="wait">Tus órdenes siguen en marcha. Esperá tu turno para cambiarlas.</div>'}
@@ -625,7 +856,7 @@ export class Hud {
       pending.length || travelling
         ? `<div class="queue">${pending
             .map((b) => {
-              const name = b.upgrading ? UPGRADES[b.type].name : BUILDINGS[b.type].name;
+              const name = b.upgrading ? UPGRADES[b.type]?.name : BUILDINGS[b.type].name;
               return `<span>${BUILDINGS[b.type].icon} ${name} ${Math.floor((b.progress / b.required) * 100)}%</span>`;
             })
             .join('')}${travelling}${pending.length && base.effective.build === 0 ? '<small class="warn">Sin constructores asignados</small>' : ''}</div>`
@@ -636,12 +867,16 @@ export class Hud {
         const lack = missingFor(player, type)
           .map((m) => `${m.amount} de ${RESOURCE_INFO[m.resource].name.toLowerCase()}`)
           .join(' y ');
+        const wall = type === 'wallWood' || type === 'wallStone';
+        const full = wall && freeWallSlot(s, base) === null;
+        const ring = wall ? `<small>Anillo: ${wallsOf(s, base).length} de ${wallSlots(s, base).length} tramos</small>` : '';
         return `<div class="card">
           <div class="card-head"><b>${info.icon} ${info.name}</b><small>${info.seconds} s</small></div>
           <p>${info.effect}</p>
+          ${ring}
           <div class="costs">${this.costsHtml(s, info.cost)}</div>
           ${lack ? `<small class="lack">Faltan ${lack}.</small>` : ''}
-          <button class="primary" data-act="build" data-type="${type}" ${myTurn && !lack ? '' : 'disabled'}>Construir</button>
+          <button class="primary" data-act="build" data-type="${type}" ${myTurn && !lack && !full ? '' : 'disabled'}>${full ? 'Anillo completo' : 'Construir'}</button>
         </div>`;
       })
       .join('');
@@ -660,13 +895,13 @@ export class Hud {
   }
 
   private upgradesHtml(s: GameState, base: Base, myTurn: boolean) {
-    const types = (Object.keys(BUILDINGS) as BuildingType[]).filter((type) =>
+    const types = (Object.keys(UPGRADES) as BuildingType[]).filter((type) =>
       s.buildings.some((b) => b.baseId === base.id && b.type === type && b.done),
     );
     if (types.length === 0) return '<p class="note">Construí edificios en esta base para poder mejorarlos.</p>';
     return types
       .map((type) => {
-        const info = UPGRADES[type];
+        const info = UPGRADES[type]!;
         const ready = upgradable(s, base, type).length;
         const lack = this.lackText(s, info.cost);
         return `<div class="card">
@@ -680,6 +915,128 @@ export class Hud {
         </div>`;
       })
       .join('');
+  }
+
+  // ---- Ejército ------------------------------------------------------------
+
+  private armyHtml(s: GameState, base: Base, myTurn: boolean) {
+    const hasBarracks = s.buildings.some((b) => b.baseId === base.id && b.type === 'barracks' && b.done);
+    const travelling = s.armies.filter((a) => a.owner === ME).reduce((sum, a) => sum + troopCount(a), 0);
+    const summary = `<div class="army-stats">
+      <span>Disponibles <b>${troopCount(base.garrison)}</b></span>
+      <span>Entrenando <b>${base.training.length}</b></span>
+      <span>Fuera <b>${travelling}</b></span>
+      <span>Total <b>${soldiersOf(s, ME)}</b></span>
+    </div>`;
+    const train = (['common', 'heavy'] as SoldierKind[])
+      .map((kind) => {
+        const info = SOLDIERS[kind];
+        const lack = this.lackText(s, info.cost);
+        return `<div class="card">
+          <div class="card-head"><b>${info.name}</b><small>${info.seconds} s</small></div>
+          <p>Ataque ${info.attack} · Vida ${info.hp} · Velocidad ${info.speed}</p>
+          <div class="costs">${this.costsHtml(s, info.cost)}</div>
+          ${lack ? `<small class="lack">Faltan ${lack}.</small>` : ''}
+          <button class="primary" data-act="train" data-type="${kind}" ${myTurn && hasBarracks && !lack ? '' : 'disabled'}>Entrenar 1</button>
+        </div>`;
+      })
+      .join('');
+    const stances = (Object.keys(STANCE_INFO) as Stance[])
+      .map((stance) => `<button class="target${base.stance === stance ? ' on' : ''}" data-act="stance" data-type="${stance}" ${myTurn ? '' : 'disabled'}>${STANCE_INFO[stance]}</button>`)
+      .join('');
+    this.sendCommon = Math.min(this.sendCommon, base.garrison.common);
+    this.sendHeavy = Math.min(this.sendHeavy, base.garrison.heavy);
+    const row = (kind: SoldierKind, count: number, max: number) => `<div class="job">
+      <span class="job-icon">⚔️</span>
+      <span class="job-name">${SOLDIERS[kind].name}<small>Hay ${max}</small></span>
+      <button class="step" data-act="troops" data-type="${kind}" data-delta="-1" ${count > 0 ? '' : 'disabled'} aria-label="Menos">−</button>
+      <b class="count">${count}</b>
+      <button class="step" data-act="troops" data-type="${kind}" data-delta="1" ${count < max ? '' : 'disabled'} aria-label="Más">+</button>
+    </div>`;
+    const none = this.sendCommon + this.sendHeavy === 0;
+    return `${summary}
+      ${hasBarracks ? '' : '<p class="note bad">Construí un cuartel en esta base para entrenar soldados.</p>'}
+      ${s.round < TRUCE_ROUNDS ? `<p class="note">Tregua: no hay ataques hasta la ronda ${TRUCE_ROUNDS}.</p>` : ''}
+      <h4>Enviar tropas</h4>
+      ${row('common', this.sendCommon, base.garrison.common)}
+      ${row('heavy', this.sendHeavy, base.garrison.heavy)}
+      <button class="primary" data-act="choose-target" ${myTurn && !none ? '' : 'disabled'}>Elegir destino</button>
+      <h4>Postura de la base</h4>
+      <div class="targets">${stances}</div>
+      <h4>Entrenar</h4>
+      ${train}`;
+  }
+
+  private orderLabel(s: GameState, army: Army): string {
+    const order = army.order;
+    if (army.fighting) return 'Combatiendo';
+    if (army.sieging) return 'Atacando la base';
+    if (order.kind === 'hold') return 'Defendiendo una posición';
+    if (order.kind === 'chase') return 'Persiguiendo a un ejército';
+    const name = s.bases.find((b) => b.id === order.baseId)?.name ?? 'una base';
+    if (order.kind === 'attack') return `${order.mode === 'raid' ? 'Va a saquear' : 'Va a conquistar'} ${name}`;
+    return `${order.kind === 'retreat' ? 'Se retira a' : 'Va a'} ${name}`;
+  }
+
+  private armyInfoHtml(s: GameState, army: Army) {
+    const owner = s.players[army.owner];
+    const mine = army.owner === ME;
+    const myTurn = activePlayer(s) === ME && s.phase.kind === 'decisions';
+    const eta = etaOf(army);
+    const actions = mine
+      ? `<button class="primary" data-act="redirect" ${myTurn ? '' : 'disabled'}>Nuevo destino</button>
+         <button class="secondary" data-act="retreat" ${myTurn ? '' : 'disabled'}>Retirarse</button>
+         ${myTurn ? '' : '<p class="note">Podés cambiar la orden en tu turno.</p>'}`
+      : '';
+    return `<header>
+        <h3>Ejército ${owner.name}</h3>
+        <button class="x" data-act="close-army" aria-label="Cerrar">✕</button>
+      </header>
+      <div class="body">
+        <p class="note"><b>${army.common}</b> comunes · <b>${army.heavy}</b> pesados</p>
+        <p class="note">${this.orderLabel(s, army)}</p>
+        ${eta > 0 && !army.fighting && !army.sieging ? `<p class="note"><b>Llega en ${eta} s</b></p>` : ''}
+        ${actions}
+      </div>`;
+  }
+
+  private sendingHtml(s: GameState, sending: Sending) {
+    const source = sending.armyId !== null ? s.armies.find((a) => a.id === sending.armyId) : s.bases.find((b) => b.id === sending.baseId);
+    const troops = sending.armyId !== null ? (source as Army | undefined) : { common: this.sendCommon, heavy: this.sendHeavy };
+    const target = sending.target;
+    let body = '<p class="note">Tocá el destino en el mapa o en el minimapa.</p>';
+    if (target && source && troops) {
+      const goal = this.targetPoint(s, target);
+      const eta = goal ? estimateEta(s, source, goal, troops) : null;
+      const time = eta === null ? '<p class="note bad">No hay camino hasta ahí.</p>' : `<p class="note"><b>Tardan ${eta} s en llegar</b></p>`;
+      const ready = eta === null ? 'disabled' : '';
+      let title = 'Esta posición';
+      let buttons = `<button class="primary" data-act="order" data-order="hold" ${ready}>Defender esta posición</button>`;
+      if (target.kind === 'army') {
+        title = `Ejército ${s.players[s.armies.find((a) => a.id === target.id)?.owner ?? 0].name}`;
+        buttons = `<button class="primary" data-act="order" data-order="chase" ${ready}>Atacar este ejército</button>`;
+      } else if (target.kind === 'base') {
+        const base = s.bases.find((b) => b.id === target.id)!;
+        title = base.name;
+        buttons =
+          base.owner === ME
+            ? `<button class="primary" data-act="order" data-order="move" ${ready}>Trasladar aquí</button>`
+            : `<button class="primary" data-act="order" data-order="conquer" ${ready}>Conquistar</button>
+               <button class="secondary" data-act="order" data-order="raid" ${ready}>Saquear</button>`;
+      }
+      body = `<p class="note"><b>${title}</b></p>${time}${buttons}`;
+    }
+    return `<header>
+        <h3>Enviar tropas</h3>
+        <button class="x" data-act="cancel-send" aria-label="Cancelar">✕</button>
+      </header>
+      <div class="body">${body}</div>`;
+  }
+
+  private targetPoint(s: GameState, target: PickTarget): Point | null {
+    if (target.kind === 'point') return target;
+    const order: ArmyOrder = target.kind === 'army' ? { kind: 'chase', armyId: target.id } : { kind: 'move', baseId: target.id };
+    return destinationOf(s, order);
   }
 
   // ---- Comercio ------------------------------------------------------------
@@ -808,7 +1165,7 @@ export class Hud {
       .map(
         ({ p, score }) => `<tr>
           <td><i class="dot" style="background:${hex(p.color)}"></i> ${p.name}</td>
-          <td>${score.citizens}</td><td>${score.buildings}</td><td>${score.bases}</td><td><b>${score.total}</b></td>
+          <td>${score.citizens}</td><td>${score.soldiers}</td><td>${score.bases}</td><td><b>${score.total}</b></td>
         </tr>`,
       )
       .join('');
@@ -816,7 +1173,7 @@ export class Hud {
       <h2>${title}</h2>
       <p>${s.phase.reason}</p>
       <table>
-        <thead><tr><th></th><th>Hab.</th><th>Edif.</th><th>Bases</th><th>Puntos</th></tr></thead>
+        <thead><tr><th></th><th>Hab.</th><th>Sold.</th><th>Bases</th><th>Puntos</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       <button class="primary" data-act="restart">Jugar otra vez</button>

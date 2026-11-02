@@ -1,19 +1,21 @@
 import Phaser from 'phaser';
 import { BASE_RADIUS, TICKS_PER_SECOND } from '../core/config';
 import { capacityOf, citizensOf, needsWork, siteAvailability } from '../core/game';
+import { troopCount, wallEnds } from '../core/war';
 import { stepMatch } from '../core/match';
-import type { Base, Building, Citizen, GameState, ResourceNode } from '../core/types';
-import { ART_SCALE, buildingKey, citizenKey, createArt } from './art';
-import { MAP_HEIGHT, MAP_WIDTH, ellipseOf, toScreen } from './iso';
+import type { Army, Base, Building, Citizen, GameState, Point, ResourceNode } from '../core/types';
+import { ART_SCALE, buildingKey, citizenKey, createArt, soldierKey } from './art';
+import { MAP_HEIGHT, MAP_WIDTH, TERRAIN_SCALE, ellipseOf, toScreen, toWorld } from './iso';
 import { paintTerrain } from './terrain';
 
 export interface SceneHost {
   state: GameState;
   speed: number;
-  selection(): { baseId: number | null; siteId: number | null; picking: boolean };
+  selection(): { baseId: number | null; siteId: number | null; armyId: number | null; picking: boolean };
   onTapBase(id: number): void;
   onTapSite(id: number): void;
-  onTapEmpty(): void;
+  onTapArmy(id: number): void;
+  onTapEmpty(point: Point): void;
   onFrame(): void;
 }
 
@@ -21,6 +23,8 @@ const STEP_MS = 1000 / TICKS_PER_SECOND;
 const TAP_SLOP = 10;
 const LABEL_FONT = 30;
 const LABEL_SIZE = 12;
+const ARMY_SPRITES = 5;
+const WALL_HEIGHT = 11;
 const pxScale = 1 / ART_SCALE;
 
 interface CitizenView {
@@ -28,14 +32,24 @@ interface CitizenView {
   x: number;
   y: number;
   job: Citizen['job'];
+  owner: number;
 }
 
 interface BuildingView {
-  sprite: Phaser.GameObjects.Image;
+  sprite?: Phaser.GameObjects.Image;
+  wall?: Phaser.GameObjects.Graphics;
   flag?: Phaser.GameObjects.Image;
   bar: Phaser.GameObjects.Graphics;
   star?: Phaser.GameObjects.Image;
   done: boolean;
+  owner: number;
+}
+
+interface ArmyView {
+  sprites: Phaser.GameObjects.Image[];
+  label: Phaser.GameObjects.Text;
+  x: number;
+  y: number;
 }
 
 interface ExpeditionView {
@@ -47,6 +61,7 @@ interface ExpeditionView {
 interface BaseView {
   hall: Phaser.GameObjects.Image;
   label: Phaser.GameObjects.Text;
+  owner: number;
 }
 
 export class WorldScene extends Phaser.Scene {
@@ -60,6 +75,9 @@ export class WorldScene extends Phaser.Scene {
   private buildingViews = new Map<number, BuildingView>();
   private baseViews = new Map<number, BaseView>();
   private expeditionViews = new Map<number, ExpeditionView>();
+  private armyViews = new Map<number, ArmyView>();
+  private routes!: Phaser.GameObjects.Graphics;
+  private arrows!: Phaser.GameObjects.Graphics;
   private siteMarks = new Map<number, Phaser.GameObjects.Graphics>();
   private influence!: Phaser.GameObjects.Graphics;
 
@@ -80,10 +98,12 @@ export class WorldScene extends Phaser.Scene {
   create() {
     const state = this.host.state;
     this.textures.addCanvas('terrain', paintTerrain(state.map));
-    this.add.image(0, 0, 'terrain').setOrigin(0).setDepth(-10);
+    this.add.image(0, 0, 'terrain').setOrigin(0).setScale(1 / TERRAIN_SCALE).setDepth(-10);
     createArt(this, state.players.map((p) => p.color));
 
     this.influence = this.add.graphics().setDepth(90001);
+    this.routes = this.add.graphics().setDepth(90002);
+    this.arrows = this.add.graphics().setDepth(90003);
     for (const peak of state.map.peaks) {
       const p = toScreen(peak.x, peak.y);
       this.add.image(p.x, p.y, 'peak').setOrigin(0.5, 0.92).setScale(pxScale * 3 * peak.size * 0.42).setDepth(p.y);
@@ -129,7 +149,7 @@ export class WorldScene extends Phaser.Scene {
     cam.setBounds(0, 0, MAP_WIDTH, MAP_HEIGHT);
     cam.setBackgroundColor('#2f86b3');
     // La isla ocupa el centro del lienzo: arranca encuadrada, sin tanto mar.
-    cam.setZoom(Math.max(this.minZoom(), Math.min(cam.width / 1280, cam.height / 760)));
+    cam.setZoom(Math.max(this.minZoom(), Math.min(cam.width / 2050, cam.height / 1200)));
     cam.centerOn(MAP_WIDTH / 2, MAP_HEIGHT / 2);
   }
 
@@ -188,7 +208,7 @@ export class WorldScene extends Phaser.Scene {
 
   private tap(worldX: number, worldY: number) {
     const state = this.host.state;
-    const reach = 46;
+    const reach = Math.max(46, (34 * this.dpr) / this.cameras.main.zoom);
     const distanceTo = (x: number, y: number) => {
       const p = toScreen(x, y);
       return Math.hypot(p.x - worldX, (p.y - 14 - worldY) * 1.2);
@@ -204,7 +224,20 @@ export class WorldScene extends Phaser.Scene {
         }
       }
       if (best >= 0) this.host.onTapSite(best);
-      else this.host.onTapEmpty();
+      else this.host.onTapEmpty(toWorld(worldX, worldY));
+      return;
+    }
+    let armyHit: Army | null = null;
+    let armyDistance = reach;
+    for (const army of state.armies) {
+      const d = distanceTo(army.x, army.y);
+      if (d < armyDistance) {
+        armyDistance = d;
+        armyHit = army;
+      }
+    }
+    if (armyHit) {
+      this.host.onTapArmy(armyHit.id);
       return;
     }
     let hit: Base | null = null;
@@ -217,7 +250,7 @@ export class WorldScene extends Phaser.Scene {
       }
     }
     if (hit) this.host.onTapBase(hit.id);
-    else this.host.onTapEmpty();
+    else this.host.onTapEmpty(toWorld(worldX, worldY));
   }
 
   focusOn(x: number, y: number) {
@@ -225,7 +258,7 @@ export class WorldScene extends Phaser.Scene {
     const cam = this.cameras.main;
     this.tweens.add({
       targets: cam,
-      zoom: Math.max(this.minZoom(), 1.05 * this.dpr),
+      zoom: Math.max(this.minZoom(), 1.3 * this.dpr),
       scrollX: p.x - cam.width / 2,
       scrollY: p.y - cam.height / 2,
       duration: 700,
@@ -244,6 +277,7 @@ export class WorldScene extends Phaser.Scene {
     const time = this.time.now;
     this.syncCitizens(state, delta, time);
     this.syncExpeditions(state, delta, time);
+    this.syncArmies(state, delta, time);
     if (time - this.lastSync > 120) {
       this.lastSync = time;
       this.syncNodes(state, time);
@@ -251,6 +285,7 @@ export class WorldScene extends Phaser.Scene {
       this.syncBuildings(state, time);
       this.syncSiteMarks(state, time);
       this.drawInfluence(state);
+      this.drawRoutes(state);
       if (!this.focused && state.phase.kind !== 'draft') {
         this.focused = true;
         const mine = state.bases.find((b) => b.owner === 0);
@@ -269,11 +304,12 @@ export class WorldScene extends Phaser.Scene {
       let view = this.citizenViews.get(c.id);
       if (!view) {
         const sprite = this.add.image(p.x, p.y, citizenKey(c.owner, c.job)).setOrigin(0.45, 0.9).setScale(pxScale * 1.15);
-        view = { sprite, x: p.x, y: p.y, job: c.job };
+        view = { sprite, x: p.x, y: p.y, job: c.job, owner: c.owner };
         this.citizenViews.set(c.id, view);
       }
-      if (view.job !== c.job) {
+      if (view.job !== c.job || view.owner !== c.owner) {
         view.job = c.job;
+        view.owner = c.owner;
         view.sprite.setTexture(citizenKey(c.owner, c.job));
       }
       const dx = p.x - view.x;
@@ -321,6 +357,101 @@ export class WorldScene extends Phaser.Scene {
       if (seen.has(id)) continue;
       view.sprites.forEach((sprite) => sprite.destroy());
       this.expeditionViews.delete(id);
+    }
+  }
+
+  private syncArmies(state: GameState, delta: number, time: number) {
+    const ease = Math.min(1, (delta / 1000) * 9);
+    const seen = new Set<number>();
+    const labelScale = (LABEL_SIZE * this.dpr) / LABEL_FONT / this.cameras.main.zoom;
+    for (const army of state.armies) {
+      seen.add(army.id);
+      const p = toScreen(army.x, army.y);
+      let view = this.armyViews.get(army.id);
+      if (!view) {
+        const label = this.add
+          .text(p.x, p.y, '', {
+            fontFamily: 'system-ui, sans-serif',
+            fontSize: `${LABEL_FONT}px`,
+            fontStyle: '800',
+            color: '#ffffff',
+            stroke: '#21302a',
+            strokeThickness: 7,
+          })
+          .setOrigin(0.5, 1)
+          .setDepth(100001);
+        view = { sprites: [], label, x: p.x, y: p.y };
+        this.armyViews.set(army.id, view);
+      }
+      const shown = Math.min(ARMY_SPRITES, troopCount(army));
+      while (view.sprites.length > shown) view.sprites.pop()!.destroy();
+      while (view.sprites.length < shown) {
+        view.sprites.push(this.add.image(p.x, p.y, soldierKey(army.owner, 'common')).setOrigin(0.45, 0.9).setScale(pxScale * 1.25));
+      }
+      const dx = p.x - view.x;
+      view.x += dx * ease;
+      view.y += (p.y - view.y) * ease;
+      const clash = army.fighting || army.sieging;
+      view.sprites.forEach((sprite, i) => {
+        const heavy = i < army.heavy;
+        const key = soldierKey(army.owner, heavy ? 'heavy' : 'common');
+        if (sprite.texture.key !== key) sprite.setTexture(key);
+        const phase = time * 0.012 + i * 1.3;
+        const offsetX = ((i % 3) - 1) * 9;
+        const y = view.y + (Math.floor(i / 3) - 0.5) * 7 + (i % 3) * 2;
+        const bob = clash ? 0 : Math.abs(Math.sin(phase)) * 1.2;
+        const lunge = clash ? Math.sin(phase * 2.4) * 2.4 : 0;
+        sprite
+          .setPosition(view.x + offsetX + lunge, y - bob)
+          .setRotation(clash ? Math.sin(phase * 2.4) * 0.25 : 0)
+          .setFlipX(dx < 0)
+          .setDepth(y + 1);
+      });
+      view.label
+        .setText(`${clash ? '⚔ ' : ''}${troopCount(army)}`)
+        .setPosition(view.x, view.y - 20)
+        .setScale(labelScale);
+    }
+    for (const [id, view] of this.armyViews) {
+      if (seen.has(id)) continue;
+      view.sprites.forEach((sprite) => sprite.destroy());
+      view.label.destroy();
+      this.armyViews.delete(id);
+    }
+  }
+
+  /** Marca el camino de los ejércitos que vienen hacia mí y el del seleccionado. */
+  private drawRoutes(state: GameState) {
+    this.routes.clear();
+    const selected = this.host.selection().armyId;
+    const width = Math.max(2, (2 * this.dpr) / this.cameras.main.zoom);
+    for (const army of state.armies) {
+      const order = army.order;
+      const attackingMe =
+        order.kind === 'attack' && army.owner !== 0 && state.bases.find((b) => b.id === order.baseId)?.owner === 0;
+      if (!attackingMe && army.id !== selected) continue;
+      const points = [army, ...army.path.slice(army.leg)].map((p) => toScreen(p.x, p.y));
+      this.routes.lineStyle(width, attackingMe ? 0xff5040 : 0xffffff, 0.85);
+      for (let i = 0; i + 1 < points.length; i++) {
+        const a = points[i];
+        const b = points[i + 1];
+        const length = Math.hypot(b.x - a.x, b.y - a.y);
+        const dashes = Math.floor(length / 26);
+        for (let d = 0; d < dashes; d += 2) {
+          this.routes.lineBetween(
+            a.x + ((b.x - a.x) * d) / dashes,
+            a.y + ((b.y - a.y) * d) / dashes,
+            a.x + ((b.x - a.x) * (d + 1)) / dashes,
+            a.y + ((b.y - a.y) * (d + 1)) / dashes,
+          );
+        }
+      }
+    }
+    this.arrows.clear();
+    for (const shot of state.shots) {
+      const from = toScreen(shot.x1, shot.y1);
+      const to = toScreen(shot.x2, shot.y2);
+      this.arrows.lineStyle(2, 0xfff1b0, 1).lineBetween(from.x, from.y - 34, to.x, to.y - 8);
     }
   }
 
@@ -378,19 +509,42 @@ export class WorldScene extends Phaser.Scene {
           })
           .setOrigin(0.5, 0)
           .setDepth(100000);
-        view = { hall, label };
+        view = { hall, label, owner: base.owner };
         this.baseViews.set(base.id, view);
         this.tweens.add({ targets: hall, scale: { from: 0, to: pxScale }, duration: 350, ease: 'Back.easeOut' });
       }
-      view.label.setText(`${base.name}  ${citizensOf(state, base.id).length}/${capacityOf(state, base)}`);
+      if (view.owner !== base.owner) {
+        view.owner = base.owner;
+        view.hall.setTexture(buildingKey('hall', base.owner));
+      }
+      const soldiers = troopCount(base.garrison);
+      const guard = soldiers > 0 ? `  ⚔${soldiers}` : '';
+      view.label.setText(`${base.name}  ${citizensOf(state, base.id).length}/${capacityOf(state, base)}${guard}`);
       view.label.setScale((LABEL_SIZE * this.dpr) / LABEL_FONT / this.cameras.main.zoom);
     }
   }
 
   private syncBuildings(state: GameState, time: number) {
+    const alive = new Set(state.buildings.map((b) => b.id));
+    for (const [id, view] of this.buildingViews) {
+      if (alive.has(id)) continue;
+      view.sprite?.destroy();
+      view.wall?.destroy();
+      view.flag?.destroy();
+      view.star?.destroy();
+      view.bar.destroy();
+      this.buildingViews.delete(id);
+    }
     for (const building of state.buildings) {
-      const view = this.buildingViews.get(building.id) ?? this.addBuilding(building);
-      if (building.done && !view.done) this.finishBuilding(building, view);
+      const view = this.buildingViews.get(building.id) ?? this.addBuilding(state, building);
+      if (building.done && !view.done) this.finishBuilding(state, building, view);
+      if (view.owner !== building.owner) {
+        view.owner = building.owner;
+        if (building.done && building.type !== 'farm' && view.sprite) {
+          view.sprite.setTexture(buildingKey(building.type, building.owner));
+        }
+        view.flag?.setTexture(buildingKey('farm', building.owner));
+      }
       view.bar.clear();
       if (needsWork(building)) {
         const ratio = Math.min(1, building.progress / building.required);
@@ -404,23 +558,55 @@ export class WorldScene extends Phaser.Scene {
       }
       if (building.done && building.type === 'farm') {
         const stage = Math.floor((time * 0.00025 + building.id) % 3);
-        view.sprite.setTexture(`crops-${stage}`);
+        view.sprite?.setTexture(`crops-${stage}`);
       }
     }
   }
 
-  private addBuilding(building: Building): BuildingView {
+  private addBuilding(state: GameState, building: Building): BuildingView {
     const p = toScreen(building.x, building.y);
-    const sprite = this.add.image(p.x, p.y, 'scaffold').setOrigin(0.5, 0.85).setScale(pxScale).setDepth(p.y);
     const bar = this.add.graphics().setDepth(99999);
-    const view: BuildingView = { sprite, bar, done: false };
+    const view: BuildingView = { bar, done: false, owner: building.owner };
+    if (building.slot !== null) {
+      view.wall = this.add.graphics().setDepth(p.y);
+      this.paintWall(state, building, view.wall, 0.45);
+    } else {
+      view.sprite = this.add.image(p.x, p.y, 'scaffold').setOrigin(0.5, 0.85).setScale(pxScale).setDepth(p.y);
+    }
     this.buildingViews.set(building.id, view);
     return view;
   }
 
-  private finishBuilding(building: Building, view: BuildingView) {
+  private paintWall(state: GameState, building: Building, wall: Phaser.GameObjects.Graphics, alpha: number) {
+    const base = state.bases.find((b) => b.id === building.baseId);
+    if (!base || building.slot === null) return;
+    const [a, b] = wallEnds(base, building.slot).map((point) => toScreen(point.x, point.y));
+    const stone = building.type === 'wallStone';
+    const side = stone ? 0x9b9a96 : 0x9a6f43;
+    const top = stone ? 0xc4c3bf : 0xbd9160;
+    const tall = stone ? WALL_HEIGHT + 3 : WALL_HEIGHT;
+    wall.clear();
+    wall.fillStyle(side, alpha);
+    wall.fillPoints(
+      [
+        { x: a.x, y: a.y },
+        { x: b.x, y: b.y },
+        { x: b.x, y: b.y - tall },
+        { x: a.x, y: a.y - tall },
+      ],
+      true,
+    );
+    wall.lineStyle(4, top, alpha).lineBetween(a.x, a.y - tall, b.x, b.y - tall);
+  }
+
+  private finishBuilding(state: GameState, building: Building, view: BuildingView) {
     view.done = true;
+    if (view.wall) {
+      this.paintWall(state, building, view.wall, 1);
+      return;
+    }
     const p = toScreen(building.x, building.y);
+    if (!view.sprite) return;
     if (building.type === 'farm') {
       view.sprite.setTexture('crops-0').setOrigin(0.5, 0.5).setDepth(p.y - 12);
       view.flag = this.add
@@ -440,6 +626,7 @@ export class WorldScene extends Phaser.Scene {
     for (const site of state.map.sites) {
       const mark = this.siteMarks.get(site.id)!;
       mark.setDepth(draft ? 90000 : -4);
+      mark.setScale(Math.max(1, (0.9 * this.dpr) / this.cameras.main.zoom));
       mark.clear();
       if (!draft || state.bases.some((b) => b.siteId === site.id)) continue;
       const open = siteAvailability(state, site) === null;

@@ -1,5 +1,5 @@
 import type Phaser from 'phaser';
-import type { Job } from '../core/types';
+import type { Job, SoldierKind } from '../core/types';
 
 /** Todo el arte se dibuja por código: sin imágenes externas y nítido con zoom. */
 export const ART_SCALE = 3;
@@ -106,6 +106,7 @@ function drawTool(c: Ctx, job: Job | 'idle') {
 }
 
 export const citizenKey = (player: number, job: Job | 'idle') => `citizen-${player}-${job}`;
+export const soldierKey = (player: number, kind: SoldierKind) => `soldier-${player}-${kind}`;
 export const buildingKey = (type: string, player: number) => `${type}-${player}`;
 
 export function createArt(scene: Phaser.Scene, colors: number[]) {
@@ -235,6 +236,50 @@ export function createArt(scene: Phaser.Scene, colors: number[]) {
       });
     });
 
+    (['common', 'heavy'] as SoldierKind[]).forEach((kind) => {
+      make(scene, soldierKey(player, kind), 20, 22, (c) => {
+        shadow(c, 9, 19.6, 5, 1.7);
+        c.fillStyle = '#3f3a36';
+        c.fillRect(6.2, 16, 2.2, 3.2);
+        c.fillRect(9.6, 16, 2.2, 3.2);
+        c.fillStyle = kind === 'heavy' ? '#8a9199' : tint;
+        c.beginPath();
+        c.roundRect(4.6, 8.6, 8.8, 8, 2.4);
+        c.fill();
+        if (kind === 'heavy') {
+          c.fillStyle = tint;
+          c.fillRect(6.4, 10, 5.2, 4.6);
+        }
+        blob(c, 9, 6, 3.5, '#f2c9a0');
+        c.fillStyle = '#9aa2a8';
+        c.beginPath();
+        c.arc(9, 5.4, 3.7, Math.PI, 0);
+        c.fill();
+        c.strokeStyle = '#c9d0d4';
+        c.lineWidth = 1.5;
+        c.beginPath();
+        c.moveTo(14, 15);
+        c.lineTo(17.6, 5);
+        c.stroke();
+        blob(c, 3.8, 12.6, 3, tint);
+      });
+    });
+
+    make(scene, buildingKey('barracks', player), 58, 52, (c) => {
+      shadow(c, 29, 44, 26, 8);
+      walls(c, 29, 46, 21, 13, '#b9a07a', '#9c8562');
+      roof(c, 29, 46, 21, 13, 10, '#6e675f', '#5b554e');
+      poly(c, [10, 34, 18, 38, 18, 30, 10, 26], '#5a4630');
+      poly(c, [36, 39, 44, 35, 44, 28, 36, 32], tint);
+      flag(c, 29, 23, 12, tint);
+    });
+    make(scene, buildingKey('tower', player), 34, 62, (c) => {
+      shadow(c, 17, 56, 13, 5);
+      walls(c, 17, 58, 10, 36, '#c3bdb0', '#a29c8f');
+      walls(c, 17, 25, 12, 7, '#d4cec2', '#b5afa2');
+      poly(c, [5, 12, 17, 18, 29, 12, 17, 6], tint);
+      flag(c, 17, 12, 9, tint);
+    });
     make(scene, buildingKey('hall', player), 76, 84, (c) => {
       shadow(c, 38, 72, 35, 11);
       walls(c, 38, 74, 26, 22, '#e8d5ae', '#cdb88f');

@@ -5,6 +5,9 @@ const SCALE_X = 0.9;
 const SCALE_Y = 0.45;
 const MARGIN = 100;
 
+/** El terreno se pinta más chico y se estira: un mapa grande no debe pesar en el celular. */
+export const TERRAIN_SCALE = 0.65;
+
 export const MAP_WIDTH = WORLD_SIZE * SCALE_X * 2 + MARGIN * 2;
 export const MAP_HEIGHT = WORLD_SIZE * SCALE_Y * 2 + MARGIN * 2;
 

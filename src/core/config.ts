@@ -1,11 +1,14 @@
-import type { Biome, BuildingType, Job, ResourceId, Stock } from './types';
+import type { Biome, BuildingType, Job, ResourceId, SoldierKind, Stance, Stock } from './types';
 
 export const TICKS_PER_SECOND = 10;
 export const seconds = (s: number) => Math.round(s * TICKS_PER_SECOND);
 
-export const WORLD_SIZE = 1000;
-export const BASE_RADIUS = 130;
-export const MIN_BASE_DISTANCE = 165;
+export const WORLD_SIZE = 1600;
+export const BASE_RADIUS = 150;
+/** Entre las bases iniciales: da tiempo a ver venir un ataque. */
+export const START_BASE_DISTANCE = 280;
+/** Para las bases que se fundan durante la partida. */
+export const MIN_BASE_DISTANCE = 200;
 
 export const MAX_POPULATION = 200;
 export const START_CITIZENS = 2;
@@ -14,7 +17,7 @@ export const BASES_PER_PLAYER = 2;
 export const TURN_SECONDS = 30;
 export const DRAFT_SECONDS = 30;
 export const TRADE_SECONDS = 30;
-export const TOTAL_ROUNDS = 24;
+export const TOTAL_ROUNDS = 30;
 
 export const RESOURCES: ResourceId[] = ['wood', 'stone', 'iron', 'food', 'water', 'gold'];
 export const JOBS: Job[] = ['wood', 'stone', 'iron', 'gold', 'food', 'water', 'build', 'reproduce'];
@@ -79,7 +82,7 @@ export const SURVIVAL_OK = 40;
 export const SURVIVAL_SHARE = 0.3;
 
 export const WORKSITE_SLOTS = 3;
-export const NODE_AMOUNT = { tree: 20, rock: 40, bush: 15, iron: 30, gold: 20 };
+export const NODE_AMOUNT = { tree: 30, rock: 50, bush: 20, iron: 40, gold: 30 };
 export const NODE_SLOTS = { tree: 1, rock: 2, bush: 1, water: 3, iron: 2, gold: 2 };
 
 export interface BuildingInfo {
@@ -89,6 +92,7 @@ export interface BuildingInfo {
   seconds: number;
   effect: string;
   footprint: number;
+  hp?: number;
 }
 
 export const BUILDINGS: Record<BuildingType, BuildingInfo> = {
@@ -124,7 +128,97 @@ export const BUILDINGS: Record<BuildingType, BuildingInfo> = {
     effect: `+${DEPOT_STORAGE} de capacidad global`,
     footprint: 26,
   },
+  barracks: {
+    name: 'Cuartel',
+    icon: '⚔️',
+    cost: { wood: 40, stone: 30, iron: 10 },
+    seconds: 25,
+    effect: 'Permite entrenar soldados en esta base',
+    footprint: 36,
+  },
+  tower: {
+    name: 'Torre defensiva',
+    icon: '🗼',
+    cost: { stone: 30, wood: 15 },
+    seconds: 25,
+    effect: 'Dispara sola a los enemigos cercanos',
+    footprint: 22,
+    hp: 300,
+  },
+  wallWood: {
+    name: 'Muro de madera',
+    icon: '🧱',
+    cost: { wood: 8 },
+    seconds: 5,
+    effect: 'Un tramo. Con el anillo completo hay que romperlo para entrar',
+    footprint: 0,
+    hp: 120,
+  },
+  wallStone: {
+    name: 'Muro de piedra',
+    icon: '🧱',
+    cost: { stone: 12 },
+    seconds: 8,
+    effect: 'Un tramo más resistente',
+    footprint: 0,
+    hp: 300,
+  },
 };
+
+export const RING_RADIUS = 112;
+export const RING_SLOTS = 12;
+export const SIEGE_RANGE = 48;
+export const TOWER_DAMAGE = 14;
+export const TOWER_RANGE = 130;
+
+/** Sin ataques al principio: nadie pierde una base antes de armar su economía. */
+export const TRUCE_ROUNDS = 5;
+export const RAID_SECONDS = 12;
+export const CONQUER_SECONDS = 30;
+export const LOOT_SHARE = 0.2;
+export const LOOT_PER_SOLDIER = 8;
+export const LOOT_MAX = 60;
+
+export interface SoldierInfo {
+  name: string;
+  hp: number;
+  attack: number;
+  defense: number;
+  /** Unidades por segundo: lentas a propósito para poder ver venir un ataque. */
+  speed: number;
+  cost: Stock;
+  seconds: number;
+}
+
+export const SOLDIERS: Record<SoldierKind, SoldierInfo> = {
+  common: {
+    name: 'Soldado común',
+    hp: 40,
+    attack: 6,
+    defense: 2,
+    speed: 5,
+    cost: { iron: 5, food: 10 },
+    seconds: 15,
+  },
+  heavy: {
+    name: 'Soldado pesado',
+    hp: 90,
+    attack: 11,
+    defense: 6,
+    speed: 3.8,
+    cost: { iron: 12, food: 15, gold: 5 },
+    seconds: 25,
+  },
+};
+
+export const STANCE_INFO: Record<Stance, string> = {
+  defensive: 'Defensiva',
+  balanced: 'Equilibrada',
+  aggressive: 'Agresiva',
+};
+
+/** Hasta qué distancia salen a buscar enemigos los defensores de una base. */
+export const STANCE_RADIUS: Record<Stance, number> = { defensive: 0, balanced: 170, aggressive: 300 };
 
 export interface UpgradeInfo {
   name: string;
@@ -138,7 +232,7 @@ export const FARM_UPGRADE_SECONDS = 4;
 export const WELL_UPGRADE_SLOTS = 2;
 export const DEPOT_UPGRADE_STORAGE = 150;
 
-export const UPGRADES: Record<BuildingType, UpgradeInfo> = {
+export const UPGRADES: Partial<Record<BuildingType, UpgradeInfo>> = {
   house: {
     name: 'Casa reforzada',
     cost: { wood: 20, iron: 10 },
@@ -173,4 +267,4 @@ export const MARKET_VALUE: Record<ResourceId, number> = { wood: 1, stone: 1, foo
 export const MARKET_SPREAD = 2;
 export const MARKET_LOT = 5;
 
-export const SCORE = { citizen: 2, building: 5, base: 10, upgrade: 3 };
+export const SCORE = { citizen: 2, soldier: 2, building: 5, base: 10, upgrade: 3 };

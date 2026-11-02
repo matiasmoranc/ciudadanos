@@ -14,6 +14,7 @@ src/core/     Simulación pura: sin Phaser, sin DOM, sin Math.random ni Date.
   game.ts     Estado, comandos validados y tick.
   trade.ts    Ofertas entre jugadores y mercado neutral.
   path.ts     Rutas por tierra para viajes largos.
+  war.ts      Soldados, ejércitos, combate, muros, saqueo y conquista.
   bot.ts      IA. Solo usa los mismos comandos que un humano.
   match.ts    Une tick + bots: es lo que correría un servidor.
 src/render/   Phaser: dibuja el estado, nunca lo modifica.
@@ -45,7 +46,7 @@ Definidas en `src/core/types.ts`.
 | `ResourceNode` | árbol, roca, arbusto, orilla, hierro u oro; cantidad restante |
 | `Site` | ubicación fundable, nombre, recursos alcanzables, estrellas, especialidad |
 
-Los soldados se agregan en la Etapa 3. Las listas `RESOURCES`, `JOBS` y `BUILDINGS` están pensadas para extenderse sin tocar la lógica de turnos.
+Los soldados no son entidades sueltas: viven como contadores en `Base.garrison` o en un `Army`, un grupo con posición, orden y ruta. Así el jugador nunca maneja unidades individuales, y 200 soldados no pesan más que unos pocos ejércitos. Las listas `RESOURCES`, `JOBS` y `BUILDINGS` están pensadas para extenderse sin tocar la lógica de turnos.
 
 ## 3. Producción y consumo
 
@@ -105,7 +106,7 @@ Los demás jugadores solo pueden responder ofertas: es la única excepción a «
 
 La economía corre en todos los turnos porque el tick no mira de quién es el turno. Solo `issue` lo mira.
 
-**Fin de partida.** Tras 24 rondas gana quien tenga más puntos: 2 por ciudadano, 5 por edificio, 3 por mejora, 10 por base. Si tu población llega a cero, perdés. Si queda un solo jugador vivo, gana. Usando tus dos fases completas, una ronda dura cerca de 1 minuto y 30 segundos y la partida unos 35 minutos.
+**Fin de partida.** Tras 30 rondas gana quien tenga más puntos: 2 por ciudadano o soldado, 5 por edificio, 3 por mejora, 10 por base. Si tu población llega a cero, perdés. Si queda un solo jugador vivo, gana. Si queda una sola civilización, gana antes. Usando tus dos fases completas, una ronda dura cerca de 1 minuto y 30 segundos, y la partida puede acercarse a los 45 minutos; lo normal es terminar fases antes.
 
 ## 6. Costos y tiempos
 
@@ -133,22 +134,53 @@ Un edificio se mejora una vez y sigue funcionando durante la obra.
 
 El Pozo no estaba en la lista de la Etapa 1 y se adelantó: sin él, una base lejos del agua quedaría sin salida.
 
-## 7. Riesgos de equilibrio
+## 7. Guerra
+
+**Tamaño del mundo.** El mapa pasó de 1000 a 1600 unidades de lado, con bosques más ralos y con claros. Las bases iniciales quedan a 280 unidades o más; las que se fundan después, a 200.
+
+**Tiempo de reacción.** Es el objetivo central del diseño militar. Un soldado común avanza 5 unidades por segundo y uno pesado 3,8, así que el ataque más cercano tarda casi un minuto y uno cruzando el mapa más de tres. Al salir un ataque, el jugador atacado recibe un aviso; mientras se acerca ve una alerta fija con la cuenta regresiva, la ruta roja en el mapa y el ejército en el minimapa. Tocar la alerta lleva hasta él.
+
+| Soldado | Costo | Entrenamiento | Vida | Ataque | Defensa | Velocidad |
+|---|---|---|---|---|---|---|
+| Común | 5 hierro + 10 comida | 15 s | 40 | 6 | 2 | 5 |
+| Pesado | 12 hierro + 15 comida + 5 oro | 25 s | 90 | 11 | 6 | 3,8 |
+
+Cada soldado sale de un ciudadano de la base, que deja de trabajar, y sigue contando como población. Un ejército con pesados camina a la velocidad de los pesados.
+
+**Tregua.** Nadie puede atacar antes de la ronda 5.
+
+**Combate.** Se resuelve una vez por segundo. Cada bando resta vida según la suma de sus ataques, reducida por la defensa media del rival, y caen primero los comunes. Dos ejércitos enemigos que se cruzan a menos de 26 unidades pelean hasta que queda uno. Un ejército también destruye las expediciones enemigas que alcanza.
+
+**Asalto a una base.** El atacante sigue este orden: romper un tramo si el anillo de muros está completo, vencer a la guarnición, derribar las torres y por último saquear (12 s) o conquistar (30 s).
+
+**Muros y torres.** Se ubican solos, como el resto de los edificios: es una decisión a favor de la regla de oro, aunque el prompt preveía ubicarlos a mano. El anillo tiene hasta 12 tramos y los que caen en agua no hacen falta. Si queda un hueco, el enemigo entra por ahí, por lo que solo el anillo completo frena el paso. Una torre tiene 300 de vida, alcanza 130 unidades y hace 14 de daño por segundo.
+
+**Saqueo.** Roba hasta el 20 % de cada recurso, con un límite de 8 por soldado y 60 por recurso, y menos si la base tiene torres o muros.
+
+**Conquista.** La base, sus edificios y sus ciudadanos pasan al ganador, y sus trabajos se reinician. Quien pierde todo y se queda sin soldados es eliminado.
+
+**Postura.** Con postura defensiva la guarnición espera en la base. Con equilibrada sale a 170 unidades, y con agresiva a 300. Después de pelear vuelve sola.
+
+**Órdenes.** Trasladar, conquistar, saquear, defender una posición, atacar un ejército y retirarse. Solo se cambian en la fase de decisiones propia. «Atacar torre» no es una orden aparte: las torres son parte del asalto.
+
+## 8. Riesgos de equilibrio
 
 - **Posición inicial.** Las regiones se reparten con una bolsa fija de biomas (5 bosques, 4 llanuras, 3 montañas, 2 praderas, 2 valles, 2 canteras), evitando repetir el bioma de las vecinas. Un jugador no debería poder quedarse con todo.
 - **Draft bloqueado.** La distancia mínima podría dejar a alguien sin lugar. Con 200 unidades, quien elegía último en 4 jugadores tenía a veces un solo sitio malo; se bajó a 165. Si aun así no queda ninguno, esa regla se relaja. Una prueba recorre muchas semillas.
 - **Base de 2 sin salida.** Dos ciudadanos no pueden trabajar y reproducirse a la vez: fundar 2 bases reparte fuerzas. Es una decisión intencional del prompt, pero conviene revisarla jugando.
 - **Base con menos de 2.** No puede reproducirse y en la Etapa 1 no hay migración. Por eso las muertes por escasez salen de la base más poblada. La expedición de la Etapa 2 lo resuelve.
 - **Agotamiento.** Sin regeneración hasta la Etapa 4, una base de pocos árboles se queda sin madera. Es parte de elegir bien; el comercio y las nuevas bases lo alivian más adelante.
-- **Hierro y oro sin destino fuerte.** Por ahora solo pagan mejoras y comercio. Su valor real llega con cuarteles y soldados en la Etapa 3.
+- **Pelea tardía de los bots.** Empiezan a atacar alrededor de la ronda 15 a 20, porque priorizan crecer. Evita derrotas tempranas, pero conviene revisarlo jugando.
+- **Saqueos repetidos.** Un bot puede volver varias veces sobre la misma base débil. El límite por ataque frena el daño.
+- **Sin caminos construidos.** El camino pavimentado y el costo por terreno todavía no afectan la velocidad.
 - **Comercio entre bots.** Hacen pocos tratos (0 a 3 por partida en las simulaciones): cada uno regatea con cuidado y sus stocks se parecen. Con una persona en la mesa, en la prueba real aceptaron ofertas razonables.
 - **Expansión tardía.** Como las expediciones necesitan más de 3 ciudadanos en origen, hay que crecer antes de expandirse. Es intencional.
 - **Bola de nieve.** La reproducción crece rápido si hay vivienda. Las casas exigen madera y piedra a la vez, lo que frena a quien solo tiene una.
 
-## 8. Etapas
+## 9. Etapas
 
 - **Etapa 1 (hecha):** mapa, draft, turnos, ciudadanos autónomos, trabajos, inventario global, casas, granjas, pozos, depósitos, reproducción, consumo, construcción automática, bots básicos y puntaje.
 - **Etapa 2 (hecha):** hierro, oro, nuevas bases, comercio, mercado neutral, mejoras, especialidad regional y alertas.
-- **Etapa 3:** soldados, combate, defensas, saqueo.
+- **Etapa 3 (hecha):** cuarteles, soldados, traslados, combate automático, muros, torres, saqueo, conquista, posturas y mapa más grande con minimapa.
 - **Etapa 4:** mundo vivo.
 - **Etapa 5:** online, tutorial, sonido, bots con tres dificultades.

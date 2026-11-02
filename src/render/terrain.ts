@@ -1,7 +1,8 @@
 import { makeNoise } from '../core/rng';
+import { WORLD_SIZE } from '../core/config';
 import { Terrain } from '../core/types';
 import type { GameMap } from '../core/types';
-import { MAP_HEIGHT, MAP_WIDTH, toScreen, toWorld } from './iso';
+import { MAP_HEIGHT, MAP_WIDTH, TERRAIN_SCALE, toScreen, toWorld } from './iso';
 
 type Rgb = [number, number, number];
 
@@ -86,15 +87,16 @@ export function paintTerrain(map: GameMap): HTMLCanvasElement {
     return top * (1 - fy) + bottom * fy;
   };
 
-  const width = Math.ceil(MAP_WIDTH);
-  const height = Math.ceil(MAP_HEIGHT);
-  const edge = (x: number, y: number) => x >= 0 && y >= 0 && x <= 1000 && y <= 1000;
+  const width = Math.ceil(MAP_WIDTH * TERRAIN_SCALE);
+  const height = Math.ceil(MAP_HEIGHT * TERRAIN_SCALE);
+  const worldAt = (px: number, py: number) => toWorld(px / TERRAIN_SCALE, py / TERRAIN_SCALE);
+  const edge = (x: number, y: number) => x >= 0 && y >= 0 && x <= WORLD_SIZE && y <= WORLD_SIZE;
   const grain = makeNoise(map.seed + 9);
 
   const mask = new Float32Array(width * height);
   for (let py = 0; py < height; py++) {
     for (let px = 0; px < width; px++) {
-      const w = toWorld(px, py);
+      const w = worldAt(px, py);
       mask[px + py * width] = edge(w.x, w.y) ? sample(landField, w.x, w.y) : 0;
     }
   }
@@ -110,7 +112,7 @@ export function paintTerrain(map: GameMap): HTMLCanvasElement {
     for (let px = 0; px < width; px++) {
       const i = px + py * width;
       const value = mask[i];
-      const w = toWorld(px, py);
+      const w = worldAt(px, py);
       const inside = edge(w.x, w.y);
       let r: number;
       let g: number;
@@ -131,7 +133,7 @@ export function paintTerrain(map: GameMap): HTMLCanvasElement {
         b = mix(WET_SAND[2], b, shoreline);
       } else {
         const fresh = inside ? sample(lakeField, w.x, w.y) : 0;
-        const cliffDepth = fresh > 0.05 ? 3 : 8;
+        const cliffDepth = fresh > 0.05 ? 2 : 6;
         const above = py - cliffDepth >= 0 ? mask[i - cliffDepth * width] : 0;
         if (above > 0.5) {
           const fade = 0.75 + (py % 3) * 0.06;
@@ -165,6 +167,7 @@ export function paintTerrain(map: GameMap): HTMLCanvasElement {
   ctx.putImageData(image, 0, 0);
 
   // Caminos naturales.
+  ctx.scale(TERRAIN_SCALE, TERRAIN_SCALE);
   ctx.lineCap = 'round';
   ctx.setLineDash([26, 15]);
   for (const path of map.paths) {

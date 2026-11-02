@@ -1,12 +1,13 @@
 import {
   BIRTH_COST,
-  BUILDINGS,
   CONSUMPTION_PER_MIN,
   EXPEDITION_COST,
   JOBS,
   MARKET_VALUE,
   REPRODUCTION_SECONDS,
   RESOURCES,
+  SOLDIERS,
+  TRUCE_ROUNDS,
   UPGRADES,
   WORK_SECONDS,
 } from './config';
@@ -27,6 +28,7 @@ import {
   upgradable,
 } from './game';
 import { canPay, marketPrice } from './trade';
+import { freeWallSlot, ringClosed, soldiersOf, troopCount } from './war';
 import type { Base, BuildingType, GameState, Job, Offer, Player, ResourceId, Stock } from './types';
 
 const MAX_BASES = 5;
@@ -36,8 +38,10 @@ const VITAL_RESERVE = 18;
 export function playBotTurn(s: GameState, player: number) {
   const owner = s.players[player];
   const bases = basesOf(s, player);
+  planBarracks(s, owner, bases);
   planBuildings(s, owner, bases);
   planExpansion(s, owner, basesOf(s, player));
+  planMilitary(s, owner, basesOf(s, player));
   assignWorkers(s, owner, bases);
   issue(s, player, { type: 'endTurn' });
 }
@@ -64,8 +68,8 @@ function planBuildings(s: GameState, owner: Player, bases: Base[]) {
   if (full && main && !pending('depot')) order(main, 'depot');
 
   for (const base of bases) {
-    for (const type of Object.keys(BUILDINGS) as BuildingType[]) {
-      const affordable = missingCost(owner, UPGRADES[type].cost).length === 0;
+    for (const type of Object.keys(UPGRADES) as BuildingType[]) {
+      const affordable = missingCost(owner, UPGRADES[type]!.cost).length === 0;
       if (!affordable || upgradable(s, base, type).length === 0) continue;
       if (owner.stock.wood < 40 || owner.stock.stone < 20) continue;
       issue(s, owner.id, { type: 'upgrade', baseId: base.id, building: type });
@@ -83,6 +87,70 @@ function planExpansion(s: GameState, owner: Player, bases: Base[]) {
   if (origin && site && citizensOf(s, origin.id).length >= 6) {
     issue(s, owner.id, { type: 'foundBase', baseId: origin.id, siteId: site.id });
   }
+}
+
+/** Va primero: si no, casas y torres gastan la madera y el cuartel nunca llega. */
+function planBarracks(s: GameState, owner: Player, bases: Base[]) {
+  const main = largestFirst(s, bases)[0];
+  if (!main || populationOf(s, owner.id) < 10) return;
+  if (s.buildings.some((b) => b.owner === owner.id && b.type === 'barracks')) return;
+  if (missingFor(owner, 'barracks').length === 0) {
+    issue(s, owner.id, { type: 'build', baseId: main.id, building: 'barracks' });
+  }
+}
+
+function planMilitary(s: GameState, owner: Player, bases: Base[]) {
+  const total = populationOf(s, owner.id);
+  const main = largestFirst(s, bases)[0];
+  if (!main || total < 10) return;
+  const has = (type: BuildingType, base: Base) => s.buildings.some((b) => b.baseId === base.id && b.type === type);
+  const threatened = s.armies.some(
+    (a) => a.owner !== owner.id && a.order.kind === 'attack' && bases.some((b) => b.id === (a.order as { baseId: number }).baseId),
+  );
+
+  for (const base of bases) {
+    const worthy = threatened || citizensOf(s, base.id).length >= 10;
+    if (worthy && !has('tower', base) && missingFor(owner, 'tower').length === 0) {
+      issue(s, owner.id, { type: 'build', baseId: base.id, building: 'tower' });
+    }
+  }
+  if (total >= 24 && owner.stock.wood > 120 && freeWallSlot(s, main) !== null) {
+    for (let i = 0; i < 12 && owner.stock.wood > 60; i++) {
+      issue(s, owner.id, { type: 'build', baseId: main.id, building: 'wallWood' });
+    }
+  }
+
+  const wanted = Math.floor(total * (threatened ? 0.45 : 0.3));
+  for (const base of bases.filter((b) => has('barracks', b))) {
+    for (let i = 0; i < 6 && soldiersOf(s, owner.id) < wanted; i++) {
+      const kind = missingCost(owner, SOLDIERS.heavy.cost).length === 0 ? 'heavy' : 'common';
+      if (owner.stock.food < 22 || !issue(s, owner.id, { type: 'train', baseId: base.id, kind }).ok) break;
+    }
+  }
+  planAttack(s, owner, bases);
+}
+
+function planAttack(s: GameState, owner: Player, bases: Base[]) {
+  if (s.round <= TRUCE_ROUNDS) return;
+  const origin = [...bases].sort((a, b) => troopCount(b.garrison) - troopCount(a.garrison))[0];
+  if (!origin || troopCount(origin.garrison) < 4) return;
+  const strength = (base: Base) =>
+    troopCount(base.garrison) +
+    s.buildings.filter((b) => b.baseId === base.id && b.type === 'tower').length * 4 +
+    (ringClosed(s, base) ? 5 : 0);
+  const target = s.bases
+    .filter((b) => b.owner !== owner.id)
+    .sort((a, b) => Math.hypot(a.x - origin.x, a.y - origin.y) - Math.hypot(b.x - origin.x, b.y - origin.y))
+    .find((b) => strength(b) * 1.2 <= troopCount(origin.garrison));
+  if (!target) return;
+  const mode = strength(target) <= 2 ? 'conquer' : 'raid';
+  issue(s, owner.id, {
+    type: 'sendArmy',
+    baseId: origin.id,
+    common: Math.ceil(origin.garrison.common * 0.8),
+    heavy: Math.ceil(origin.garrison.heavy * 0.8),
+    order: { kind: 'attack', baseId: target.id, mode },
+  });
 }
 
 function largestFirst(s: GameState, bases: Base[]) {
@@ -123,7 +191,7 @@ function assignWorkers(s: GameState, owner: Player, bases: Base[]) {
       take('reproduce', population >= 10 ? 4 : 2);
     }
     if (s.buildings.some((b) => b.baseId === base.id && needsWork(b))) take('build', population >= 6 ? 2 : 1);
-    if (population >= 8 && hasSource(s, base, 'iron')) take('iron', population >= 14 ? 2 : 1);
+    if (population >= 5 && hasSource(s, base, 'iron')) take('iron', population >= 12 ? 3 : 1);
     if (population >= 10 && hasSource(s, base, 'gold')) take('gold', 1);
 
     const woodFirst = owner.stock.wood <= owner.stock.stone * 1.6;
@@ -203,6 +271,10 @@ function tradeTurn(s: GameState, owner: Player) {
   )[0];
   if (hungry && owner.stock[richest] >= marketPrice(richest, hungry)) {
     issue(s, owner.id, { type: 'market', give: richest, want: hungry });
+  }
+  const spare = owner.stock[richest] - marketPrice(richest, 'iron');
+  if (populationOf(s, owner.id) >= 10 && owner.stock.iron < 15 && richest !== 'iron' && spare >= 40) {
+    issue(s, owner.id, { type: 'market', give: richest, want: 'iron' });
   }
 
   const basics: ResourceId[] = populationOf(s, owner.id) >= 10 ? ['wood', 'stone', 'iron', 'water', 'food'] : ['wood', 'stone', 'water', 'food'];

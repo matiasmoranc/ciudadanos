@@ -36,6 +36,7 @@ function showMenu() {
       <li>Trabajan solos, incluso en los turnos de los demás.</li>
       <li>Cuidá la comida y el agua: sin ellas, tu gente muere.</li>
       <li>Comerciá lo que te sobra y fundá nuevas bases.</li>
+      <li>Entrená soldados: vigilá el mapa y el minimapa para ver venir los ataques.</li>
       <li>Construí, reproducite y sumá más puntos en ${TOTAL_ROUNDS} rondas.</li>
     </ol>
     <div class="field">Bots rivales</div>
@@ -59,14 +60,20 @@ function start() {
   const setups = PLAYERS.slice(0, rivals + 1).map((p, i) => ({ ...p, isBot: i > 0 }));
   const state: GameState = createGame(seed, setups);
 
-  const hud = new Hud(hudRoot, state, showMenu, (base) => scene()?.focusOn(base.x, base.y));
+  const hud = new Hud(hudRoot, state, showMenu, (point) => scene()?.focusOn(point.x, point.y));
   const host: SceneHost = {
     state,
     speed: Number(params.get('speed')) || 1,
-    selection: () => ({ baseId: hud.selectedBase, siteId: hud.selectedSite, picking: hud.expanding !== null }),
+    selection: () => ({
+      baseId: hud.selectedBase,
+      siteId: hud.selectedSite,
+      armyId: hud.selectedArmy,
+      picking: hud.expanding !== null,
+    }),
     onTapBase: (id) => hud.tapBase(id),
     onTapSite: (id) => hud.tapSite(id),
-    onTapEmpty: () => hud.tapEmpty(),
+    onTapArmy: (id) => hud.tapArmy(id),
+    onTapEmpty: (point) => hud.tapEmpty(point),
     onFrame: () => hud.frame(),
   };
 

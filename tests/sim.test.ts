@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BUILDINGS, MAX_POPULATION, MIN_BASE_DISTANCE, seconds } from '../src/core/config';
+import { BUILDINGS, MAX_POPULATION, START_BASE_DISTANCE, seconds } from '../src/core/config';
 import {
   activePlayer,
   basesOf,
@@ -120,7 +120,7 @@ describe('selección inicial', () => {
     const first = bestSite(s)!;
     issue(s, 0, { type: 'pickSite', siteId: first.id });
     const near = s.map.sites.find(
-      (x) => x.id !== first.id && Math.hypot(x.x - first.x, x.y - first.y) < MIN_BASE_DISTANCE,
+      (x) => x.id !== first.id && Math.hypot(x.x - first.x, x.y - first.y) < START_BASE_DISTANCE,
     );
     for (let i = 0; i < 30 && activePlayer(s) !== 0; i++) stepMatch(s);
     expect(issue(s, 0, { type: 'pickSite', siteId: first.id }).ok).toBe(false);
@@ -300,7 +300,7 @@ describe('mejoras', () => {
     expect(s.players[0].stock.iron).toBe(2);
     expect(capacityOf(s, base)).toBe(capacity);
     run(s, 12);
-    expect(s.buildings[0].level).toBe(2);
+    expect(s.buildings.find((b) => b.type === 'house')!.level).toBe(2);
     expect(capacityOf(s, base)).toBe(capacity + 4);
     expect(issue(s, 0, { type: 'upgrade', baseId: base.id, building: 'house' }).ok).toBe(false);
   });

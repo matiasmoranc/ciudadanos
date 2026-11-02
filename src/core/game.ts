@@ -16,6 +16,7 @@ import {
   JOBS,
   MAX_POPULATION,
   MIN_BASE_DISTANCE,
+  START_BASE_DISTANCE,
   REPRODUCTION_SECONDS,
   RESOURCES,
   RESOURCE_INFO,
@@ -46,6 +47,7 @@ import { generateMap, isLand, segmentClear } from './mapgen';
 import { findPath } from './path';
 import { stepRng } from './rng';
 import { counter, market, propose, respond } from './trade';
+import { etaOf, freeWallSlot, orderArmy, retreatArmy, sendArmy, setStance, soldiersOf, stepWar, train, troopCount, wallPoint } from './war';
 import type {
   Base,
   Building,
@@ -114,6 +116,8 @@ export function createGame(seed: number, setups: PlayerSetup[]): GameState {
     citizens: [],
     buildings: [],
     expeditions: [],
+    armies: [],
+    shots: [],
     offers: [],
     events: [],
     warned: {},
@@ -141,7 +145,8 @@ function warn(s: GameState, key: string, player: number, text: string, level: To
 export const citizensOf = (s: GameState, baseId: number) => s.citizens.filter((c) => c.baseId === baseId);
 export const populationOf = (s: GameState, player: number) =>
   s.citizens.filter((c) => c.owner === player).length +
-  s.expeditions.reduce((sum, e) => sum + (e.owner === player ? e.settlers : 0), 0);
+  s.expeditions.reduce((sum, e) => sum + (e.owner === player ? e.settlers : 0), 0) +
+  soldiersOf(s, player);
 export const basesOf = (s: GameState, player: number) => s.bases.filter((b) => b.owner === player);
 
 export const capacityOf = (s: GameState, base: Base) =>
@@ -166,26 +171,34 @@ export function productivityOf(player: Player): number {
 }
 
 export function scoreOf(s: GameState, player: number) {
-  const citizens = populationOf(s, player);
+  const soldiers = soldiersOf(s, player);
+  const citizens = populationOf(s, player) - soldiers;
   const buildings = s.buildings.filter((b) => b.owner === player && b.done).length;
   const bases = basesOf(s, player).length;
   const upgrades = s.buildings.filter((b) => b.owner === player && b.level > 1).length;
   return {
     citizens,
+    soldiers,
     buildings,
     bases,
     upgrades,
-    total: citizens * SCORE.citizen + buildings * SCORE.building + bases * SCORE.base + upgrades * SCORE.upgrade,
+    total:
+      citizens * SCORE.citizen +
+      soldiers * SCORE.soldier +
+      buildings * SCORE.building +
+      bases * SCORE.base +
+      upgrades * SCORE.upgrade,
   };
 }
 
 export function siteAvailability(s: GameState, site: Site): string | null {
   const claimed = [...s.bases.map((b) => b.siteId), ...s.expeditions.map((e) => e.siteId)];
   if (claimed.includes(site.id)) return 'Este lugar ya está ocupado.';
+  const distance = s.phase.kind === 'draft' ? START_BASE_DISTANCE : MIN_BASE_DISTANCE;
   const tooClose = (other: Site) =>
     claimed.some((id) => {
       const taken = s.map.sites[id];
-      return Math.hypot(taken.x - other.x, taken.y - other.y) < MIN_BASE_DISTANCE;
+      return Math.hypot(taken.x - other.x, taken.y - other.y) < distance;
     });
   if (!tooClose(site)) return null;
   // En la selección inicial nadie puede quedarse sin lugar: ahí la distancia cede.
@@ -306,6 +319,16 @@ export function issue(s: GameState, player: number, cmd: Command): CommandResult
       return orderUpgrade(s, player, cmd.baseId, cmd.building);
     case 'foundBase':
       return foundBase(s, player, cmd.baseId, cmd.siteId);
+    case 'train':
+      return train(s, player, cmd.baseId, cmd.kind);
+    case 'setStance':
+      return setStance(s, player, cmd.baseId, cmd.stance);
+    case 'sendArmy':
+      return sendArmy(s, player, cmd.baseId, cmd.common, cmd.heavy, cmd.order);
+    case 'orderArmy':
+      return orderArmy(s, player, cmd.armyId, cmd.order);
+    case 'retreat':
+      return retreatArmy(s, player, cmd.armyId);
     default:
       return { ok: false, error: 'Eso se hace en la fase de comercio.' };
   }
@@ -344,6 +367,10 @@ function createBase(s: GameState, player: number, site: Site, citizens: number):
     autoSurvive: true,
     crisis: { food: false, water: false },
     reproProgress: 0,
+    garrison: { common: 0, heavy: 0 },
+    wounds: 0,
+    training: [],
+    stance: 'balanced',
   };
   s.bases.push(base);
   for (let i = 0; i < citizens; i++) addCitizen(s, base);
@@ -381,7 +408,10 @@ function orderBuilding(s: GameState, player: number, baseId: number, type: Build
   const owner = s.players[player];
   const lacking = lackingError(missingFor(owner, type));
   if (lacking) return lacking;
-  const spot = findBuildSpot(s, base, type);
+  const wall = type === 'wallWood' || type === 'wallStone';
+  const slot = wall ? freeWallSlot(s, base) : null;
+  if (wall && slot === null) return { ok: false, error: 'El anillo de muros ya está completo.' };
+  const spot = slot !== null ? wallPoint(base, slot) : findBuildSpot(s, base, type);
   if (!spot) return { ok: false, error: 'No queda espacio para construir en esta base.' };
   const info = BUILDINGS[type];
   pay(owner, info.cost);
@@ -398,6 +428,8 @@ function orderBuilding(s: GameState, player: number, baseId: number, type: Build
     level: 1,
     upgrading: false,
     users: 0,
+    slot,
+    hp: 0,
   });
   if (base.jobs.build === 0) {
     warn(s, `nobuilder:${base.id}`, player, `Asigná un constructor en ${base.name} para empezar la obra.`, 'warn', 20);
@@ -425,6 +457,7 @@ function orderUpgrade(s: GameState, player: number, baseId: number, type: Buildi
   if (!building) return { ok: false, error: 'No hay edificios para mejorar.' };
   const owner = s.players[player];
   const info = UPGRADES[type];
+  if (!info) return { ok: false, error: 'Ese edificio no tiene mejoras.' };
   const lacking = lackingError(missingCost(owner, info.cost));
   if (lacking) return lacking;
   pay(owner, info.cost);
@@ -479,7 +512,7 @@ function findBuildSpot(s: GameState, base: Base, type: BuildingType): Point | nu
   const reach = nodesInReach(s, base).filter((n) => n.kind !== 'water' && hasStock(n));
   const golden = Math.PI * (3 - Math.sqrt(5));
   for (let i = 0; i < 160; i++) {
-    const radius = 34 + i * 0.55;
+    const radius = 34 + i * 0.4;
     const angle = i * golden;
     const p = { x: base.x + Math.cos(angle) * radius, y: base.y + Math.sin(angle) * radius };
     if (!isLand(s.map, p.x, p.y) || !segmentClear(s.map, base, p)) continue;
@@ -601,6 +634,7 @@ export function tick(s: GameState) {
 
   for (const c of s.citizens) stepCitizen(s, c);
   for (const expedition of [...s.expeditions]) stepExpedition(s, expedition);
+  stepWar(s);
   for (const base of s.bases) stepReproduction(s, base);
   for (const player of s.players) if (player.alive) stepSurvival(s, player);
   if (s.tick % TICKS_PER_SECOND === 0) checkEliminations(s);
@@ -861,10 +895,11 @@ function stepCitizen(s: GameState, c: Citizen) {
     if (building.upgrading) {
       building.upgrading = false;
       building.level = 2;
-      say(s, player.id, `${UPGRADES[building.type].name} lista en ${base.name}.`, 'good');
+      say(s, player.id, `${UPGRADES[building.type]?.name} lista en ${base.name}.`, 'good');
     } else {
       building.done = true;
-      say(s, player.id, `${BUILDINGS[building.type].name} terminada en ${base.name}.`, 'good');
+      building.hp = BUILDINGS[building.type].hp ?? 0;
+      if (building.slot === null) say(s, player.id, `${BUILDINGS[building.type].name} terminada en ${base.name}.`, 'good');
     }
     return;
   }
@@ -999,6 +1034,7 @@ export interface Alert {
   key: string;
   text: string;
   level: 'warn' | 'bad';
+  armyId?: number;
 }
 
 /** Problemas actuales de un jugador, para mostrarlos sin que tenga que buscarlos. */
@@ -1006,6 +1042,15 @@ export function alertsFor(s: GameState, playerId: number): Alert[] {
   const alerts: Alert[] = [];
   const player = s.players[playerId];
   const rates = ratesFor(s, playerId);
+  for (const army of s.armies) {
+    if (army.owner === playerId || army.order.kind !== 'attack') continue;
+    const { baseId } = army.order;
+    const target = s.bases.find((b) => b.id === baseId);
+    if (target?.owner !== playerId) continue;
+    const when = army.sieging ? 'atacando' : `llega en ${etaOf(army)} s`;
+    const text = `${s.players[army.owner].name}: ${troopCount(army)} soldados a ${target.name}, ${when}`;
+    alerts.push({ key: `army-${army.id}`, text, level: 'bad', armyId: army.id });
+  }
   for (const resource of ['food', 'water'] as const) {
     const name = RESOURCE_INFO[resource].name;
     const net = rates[resource].net;

@@ -300,6 +300,42 @@ button[disabled] {
   background: #b22f22;
 }
 
+button.alert {
+  min-height: 30px;
+  text-align: left;
+}
+
+#minimap {
+  position: absolute;
+  right: calc(8px + var(--safe-r));
+  bottom: 8px;
+  width: 150px;
+  aspect-ratio: 1900 / 1000;
+  border-radius: 10px;
+  background: rgb(47 134 179 / 0.92);
+  border: 2px solid rgb(255 255 255 / 0.8);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.35);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+#panel.open ~ #minimap {
+  right: calc(306px + var(--safe-r));
+}
+
+.army-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 10px;
+  padding: 2px 2px 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.army-stats b {
+  color: var(--ink);
+}
+
 /* Panel de base */
 #panel {
   position: absolute;
@@ -374,7 +410,9 @@ button[disabled] {
 
 .tab {
   flex: 1;
+  min-width: 0;
   min-height: 36px;
+  font-size: 12px;
   border-radius: 9px 9px 0 0;
   font-weight: 700;
   color: var(--muted);
@@ -996,6 +1034,14 @@ small.warn {
   #banner {
     font-size: 20px;
   }
+
+  #minimap {
+    width: 110px;
+  }
+
+  #panel.open ~ #minimap {
+    right: calc(286px + var(--safe-r));
+  }
 }
 
 /* Celular en vertical: la barra ocupa dos filas y el panel sube desde abajo. */
@@ -1043,5 +1089,13 @@ small.warn {
 
   #panel.open ~ #toasts {
     bottom: calc(52vh + 12px);
+  }
+
+  #minimap,
+  #panel.open ~ #minimap {
+    top: calc(var(--top-h) + 10px);
+    right: 8px;
+    bottom: auto;
+    width: 104px;
   }
 }

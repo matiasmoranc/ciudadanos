@@ -3,12 +3,16 @@ import { makeNoise, makeRng } from './rng';
 import { Terrain } from './types';
 import type { Biome, GameMap, NodeKind, Point, ResourceId, ResourceNode, Site } from './types';
 
-const GRID = 256;
+const GRID = 400;
 const CELL = WORLD_SIZE / GRID;
 const CENTER = WORLD_SIZE / 2;
+/** Escala de las formas del mapa respecto del mundo de referencia de 1000. */
+const SCALE = WORLD_SIZE / 1000;
 
-const REGION_SPACING = 150;
-const SITE_CLEARANCE = 42;
+const REGION_SPACING = 235;
+const SITE_CLEARANCE = 75;
+/** Separación de la grilla de siembra: más grande, menos cargado de árboles. */
+const SEED_STEP = 18;
 
 const BIOME_BAG: Biome[] = [
   'forest', 'plains', 'mountain', 'meadow', 'forest', 'rocky',
@@ -36,7 +40,7 @@ const BIOME_TERRAIN: Record<Biome, Terrain> = {
 
 /** Probabilidad de que un intento de siembra deje cada nodo, por terreno. */
 const DENSITY: Partial<Record<Terrain, Partial<Record<NodeKind, number>>>> = {
-  [Terrain.Forest]: { tree: 0.95, bush: 0.14, rock: 0.03 },
+  [Terrain.Forest]: { tree: 0.68, bush: 0.14, rock: 0.03 },
   [Terrain.Meadow]: { bush: 0.34, tree: 0.1 },
   [Terrain.Fertile]: { bush: 0.42, tree: 0.06 },
   [Terrain.Plains]: { bush: 0.16, tree: 0.08, rock: 0.04, iron: 0.01 },
@@ -46,12 +50,12 @@ const DENSITY: Partial<Record<Terrain, Partial<Record<NodeKind, number>>>> = {
 };
 
 const STAR_THRESHOLDS: Record<ResourceId, number[]> = {
-  wood: [300, 700, 1500, 2800],
-  stone: [240, 600, 1300, 2400],
-  iron: [30, 90, 240, 500],
-  food: [150, 300, 550, 900],
+  wood: [250, 450, 900, 1700],
+  stone: [200, 500, 1500, 2500],
+  iron: [30, 80, 300, 650],
+  food: [120, 300, 600, 1000],
   water: [1, 2, 4, 7],
-  gold: [20, 40, 120, 240],
+  gold: [20, 60, 200, 400],
 };
 
 const cellIndex = (x: number, y: number) => {
@@ -111,8 +115,8 @@ export function generateMap(seed: number): GameMap {
   const coast = new Float32Array(GRID * GRID);
 
   const coastAt = (x: number, y: number) => {
-    const d = Math.hypot(x - CENTER, y - CENTER) / 470;
-    return 1 - (d + (coastNoise(x * 0.006, y * 0.006) - 0.5) * 0.55);
+    const d = Math.hypot(x - CENTER, y - CENTER) / (470 * SCALE);
+    return 1 - (d + (coastNoise((x * 0.006) / SCALE, (y * 0.006) / SCALE) - 0.5) * 0.55);
   };
 
   for (let cy = 0; cy < GRID; cy++) {
@@ -165,8 +169,8 @@ export function generateMap(seed: number): GameMap {
         terrain[i] = Terrain.Beach;
         continue;
       }
-      const wx = x + (warpX(x * 0.008, y * 0.008) - 0.5) * 170;
-      const wy = y + (warpY(x * 0.008, y * 0.008) - 0.5) * 170;
+      const wx = x + (warpX((x * 0.008) / SCALE, (y * 0.008) / SCALE) - 0.5) * 170 * SCALE;
+      const wy = y + (warpY((x * 0.008) / SCALE, (y * 0.008) / SCALE) - 0.5) * 170 * SCALE;
       let nearest = 0;
       let best = Infinity;
       seeds.forEach((s, index) => {
@@ -179,7 +183,7 @@ export function generateMap(seed: number): GameMap {
       const biome = biomes[nearest];
       terrain[i] = BIOME_TERRAIN[biome];
       const lift = biome === 'mountain' ? 1 : biome === 'rocky' ? 0.5 : 0.12;
-      elevation[i] = lift * (0.45 + hillNoise(x * 0.02, y * 0.02) * 0.9);
+      elevation[i] = lift * (0.45 + hillNoise((x * 0.02) / SCALE, (y * 0.02) / SCALE) * 0.9);
     }
   }
 
@@ -206,16 +210,16 @@ export function generateMap(seed: number): GameMap {
 
   // Lagos entre regiones.
   const lakes: Point[] = [];
-  for (let tries = 0; tries < 800 && lakes.length < 5; tries++) {
+  for (let tries = 0; tries < 1200 && lakes.length < 7; tries++) {
     const a = seeds[Math.floor(rng() * seeds.length)];
     const b = seeds[Math.floor(rng() * seeds.length)];
     const d = Math.hypot(a.x - b.x, a.y - b.y);
-    if (a === b || d > 260) continue;
+    if (a === b || d > 420) continue;
     const p = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-    if (nearSeed(p.x, p.y, 72) || coastAt(p.x, p.y) < 0.1) continue;
-    if (lakes.some((l) => Math.hypot(l.x - p.x, l.y - p.y) < 170)) continue;
+    if (nearSeed(p.x, p.y, 95) || coastAt(p.x, p.y) < 0.1) continue;
+    if (lakes.some((l) => Math.hypot(l.x - p.x, l.y - p.y) < 240)) continue;
     lakes.push(p);
-    const radius = 26 + rng() * 18;
+    const radius = 34 + rng() * 26;
     for (let i = 0; i < 14; i++) {
       const angle = (i / 14) * Math.PI * 2;
       const r = radius * (0.5 + lakeNoise(p.x * 0.05 + i, p.y * 0.05) * 0.5);
@@ -230,15 +234,15 @@ export function generateMap(seed: number): GameMap {
     let heading = away + (rng() - 0.5) * 1.6;
     let x = source.x + Math.cos(heading) * 50;
     let y = source.y + Math.sin(heading) * 50;
-    let width = 4;
-    for (let step = 0; step < 120; step++) {
+    let width = 5;
+    for (let step = 0; step < 200; step++) {
       if (coastAt(x, y) <= 0) break;
       carve(x, y, width, Terrain.River);
-      width = Math.min(8, width + 0.08);
-      const bend = (warpX(x * 0.012, y * 0.012) - 0.5) * 1.6;
+      width = Math.min(10, width + 0.06);
+      const bend = (warpX((x * 0.012) / SCALE, (y * 0.012) / SCALE) - 0.5) * 1.6;
       const seaward = Math.atan2(y - CENTER, x - CENTER);
       heading += (seaward - heading) * 0.12 + bend * 0.25;
-      const close = seeds.find((s) => Math.hypot(s.x - x, s.y - y) < 58);
+      const close = seeds.find((s) => Math.hypot(s.x - x, s.y - y) < 85);
       if (close) heading += Math.sign(Math.sin(Math.atan2(close.y - y, close.x - x) - heading)) * -0.7;
       x += Math.cos(heading) * 8;
       y += Math.sin(heading) * 8;
@@ -264,15 +268,17 @@ export function generateMap(seed: number): GameMap {
     const amount = kind === 'water' ? -1 : NODE_AMOUNT[kind];
     nodes.push({ id: nodes.length, kind, x, y, amount, max: amount, slots: NODE_SLOTS[kind], users: 0 });
   };
-  const STEP = 13;
-  for (let gy = STEP; gy < WORLD_SIZE; gy += STEP) {
-    for (let gx = STEP; gx < WORLD_SIZE; gx += STEP) {
-      const x = gx + (rng() - 0.5) * STEP * 0.85;
-      const y = gy + (rng() - 0.5) * STEP * 0.85;
+  for (let gy = SEED_STEP; gy < WORLD_SIZE; gy += SEED_STEP) {
+    for (let gx = SEED_STEP; gx < WORLD_SIZE; gx += SEED_STEP) {
+      const x = gx + (rng() - 0.5) * SEED_STEP * 0.85;
+      const y = gy + (rng() - 0.5) * SEED_STEP * 0.85;
       const roll = rng();
       if (!isLandCell(terrain, x, y) || nearSeed(x, y, SITE_CLEARANCE)) continue;
-      const table = DENSITY[terrain[cellIndex(x, y)] as Terrain];
+      const kindHere = terrain[cellIndex(x, y)] as Terrain;
+      const table = DENSITY[kindHere];
       if (!table) continue;
+      // Los bosques dejan claros para que el mapa se pueda leer.
+      if (kindHere === Terrain.Forest && lakeNoise(x * 0.012, y * 0.012) < 0.47) continue;
       let acc = 0;
       for (const kind of ['tree', 'rock', 'bush', 'iron', 'gold'] as NodeKind[]) {
         acc += table[kind] ?? 0;
@@ -295,7 +301,7 @@ export function generateMap(seed: number): GameMap {
       );
       if (!touches) continue;
       const p = { x: (cx + 0.5) * CELL, y: (cy + 0.5) * CELL };
-      if (shore.some((s) => Math.hypot(s.x - p.x, s.y - p.y) < 26)) continue;
+      if (shore.some((s) => Math.hypot(s.x - p.x, s.y - p.y) < 32)) continue;
       shore.push(p);
       addNode('water', p.x, p.y);
     }
@@ -335,19 +341,19 @@ export function generateMap(seed: number): GameMap {
   });
 
   // Cumbres decorativas, lejos de los sitios para no tapar las bases.
-  for (let tries = 0; tries < 900; tries++) {
+  for (let tries = 0; tries < 1400; tries++) {
     const x = rng() * WORLD_SIZE;
     const y = rng() * WORLD_SIZE;
-    if (terrainAt(map, x, y) !== Terrain.Mountain || nearSeed(x, y, 75)) continue;
-    if (map.peaks.some((p) => Math.hypot(p.x - x, p.y - y) < 34)) continue;
+    if (terrainAt(map, x, y) !== Terrain.Mountain || nearSeed(x, y, 125)) continue;
+    if (map.peaks.some((p) => Math.hypot(p.x - x, p.y - y) < 80)) continue;
     map.peaks.push({ x, y, size: 0.7 + rng() * 0.6 });
   }
 
   // Caminos naturales entre sitios vecinos con paso por tierra.
   map.sites.forEach((a, i) => {
     map.sites.slice(i + 1).forEach((b) => {
-      if (Math.hypot(a.x - b.x, a.y - b.y) > 260 || !segmentClear(map, a, b)) return;
-      const bend = (rng() - 0.5) * 60;
+      if (Math.hypot(a.x - b.x, a.y - b.y) > 420 || !segmentClear(map, a, b)) return;
+      const bend = (rng() - 0.5) * 90;
       map.paths.push([
         a,
         { x: (a.x + b.x) / 2 + bend, y: (a.y + b.y) / 2 - bend },

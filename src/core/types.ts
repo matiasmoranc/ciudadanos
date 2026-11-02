@@ -1,7 +1,9 @@
 export type ResourceId = 'wood' | 'stone' | 'iron' | 'gold' | 'food' | 'water';
 export type Stock = Partial<Record<ResourceId, number>>;
 export type Job = ResourceId | 'build' | 'reproduce';
-export type BuildingType = 'house' | 'farm' | 'well' | 'depot';
+export type BuildingType = 'house' | 'farm' | 'well' | 'depot' | 'barracks' | 'tower' | 'wallWood' | 'wallStone';
+export type SoldierKind = 'common' | 'heavy';
+export type Stance = 'defensive' | 'balanced' | 'aggressive';
 export type NodeKind = 'tree' | 'rock' | 'bush' | 'water' | 'iron' | 'gold';
 export type Biome = 'forest' | 'mountain' | 'plains' | 'meadow' | 'fertile' | 'rocky';
 
@@ -80,6 +82,11 @@ export interface Base extends Point {
   autoSurvive: boolean;
   crisis: { food: boolean; water: boolean };
   reproProgress: number;
+  /** Soldados que defienden la base. No están en el mapa hasta que salen. */
+  garrison: Troops;
+  wounds: number;
+  training: { kind: SoldierKind; left: number }[];
+  stance: Stance;
 }
 
 export interface Building extends Point {
@@ -93,6 +100,45 @@ export interface Building extends Point {
   level: number;
   upgrading: boolean;
   users: number;
+  /** Puesto en el anillo de muros; null para el resto de los edificios. */
+  slot: number | null;
+  hp: number;
+}
+
+export interface Troops {
+  common: number;
+  heavy: number;
+}
+
+export type ArmyOrder =
+  | { kind: 'move'; baseId: number }
+  | { kind: 'retreat'; baseId: number }
+  | { kind: 'attack'; baseId: number; mode: 'conquer' | 'raid' }
+  | { kind: 'hold'; x: number; y: number }
+  | { kind: 'chase'; armyId: number };
+
+/** Grupo de soldados en el mapa: se mueve y pelea como una sola unidad. */
+export interface Army extends Point, Troops {
+  id: number;
+  owner: number;
+  wounds: number;
+  order: ArmyOrder;
+  path: Point[];
+  leg: number;
+  fighting: boolean;
+  sieging: boolean;
+  /** Segundos de saqueo o conquista acumulados. */
+  progress: number;
+  /** Base a la que vuelve después de una salida defensiva. */
+  home: number | null;
+}
+
+export interface Shot {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  at: number;
 }
 
 /** Ciudadanos en camino a fundar una base. No pertenecen a ninguna base mientras viajan. */
@@ -161,6 +207,8 @@ export interface GameState {
   citizens: Citizen[];
   buildings: Building[];
   expeditions: Expedition[];
+  armies: Army[];
+  shots: Shot[];
   offers: Offer[];
   events: GameEvent[];
   warned: Record<string, number>;
@@ -178,6 +226,11 @@ export type Command =
   | { type: 'respond'; offerId: number; accept: boolean }
   | { type: 'counter'; offerId: number; give: Stock; want: Stock }
   | { type: 'market'; give: ResourceId; want: ResourceId }
+  | { type: 'train'; baseId: number; kind: SoldierKind }
+  | { type: 'setStance'; baseId: number; stance: Stance }
+  | { type: 'sendArmy'; baseId: number; common: number; heavy: number; order: ArmyOrder }
+  | { type: 'orderArmy'; armyId: number; order: ArmyOrder }
+  | { type: 'retreat'; armyId: number }
   | { type: 'endTurn' };
 
 export type CommandResult = { ok: true } | { ok: false; error: string };
