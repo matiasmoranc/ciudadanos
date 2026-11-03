@@ -37,6 +37,7 @@ import {
   storageOf,
   upgradable,
 } from '../core/game';
+import { landStatus, siteWarnings } from '../core/ecology';
 import { canPay, marketPrice, suggestTrade } from '../core/trade';
 import { destinationOf, estimateEta, etaOf, freeWallSlot, soldiersOf, troopCount, wallSlots, wallsOf } from '../core/war';
 import type {
@@ -79,7 +80,7 @@ const REPRO_TEXT = {
   cap: `Llegaste al máximo de ${MAX_POPULATION}.`,
 };
 
-type Tab = 'jobs' | 'build' | 'upgrades' | 'army';
+type Tab = 'jobs' | 'build' | 'upgrades' | 'army' | 'land';
 
 type PickTarget = { kind: 'base'; id: number } | { kind: 'army'; id: number } | ({ kind: 'point' } & Point);
 
@@ -320,6 +321,9 @@ export class Hud {
         }
         break;
       }
+      case 'focus-point':
+        this.onFocus({ x: Number(element.dataset.x), y: Number(element.dataset.y) });
+        break;
       case 'train':
         if (baseId !== null) this.send({ type: 'train', baseId, kind: type as SoldierKind });
         break;
@@ -469,6 +473,14 @@ export class Hud {
     const c = this.minimap.getContext('2d')!;
     c.clearRect(0, 0, width, height);
     c.drawImage(this.minimapLand, 0, 0);
+    for (const site of s.map.sites) {
+      if (!s.eco[site.id].drought) continue;
+      const p = at(site);
+      c.fillStyle = 'rgba(190, 140, 60, 0.6)';
+      c.beginPath();
+      c.ellipse(p.x, p.y, 13 * ratio, 7 * ratio, 0, 0, Math.PI * 2);
+      c.fill();
+    }
     for (const base of s.bases) {
       const p = at(base);
       c.fillStyle = hex(s.players[base.owner].color);
@@ -631,7 +643,9 @@ export class Hud {
       .map((alert) =>
         alert.armyId !== undefined
           ? `<button class="alert ${alert.level}" data-act="focus-army" data-army="${alert.armyId}">⚔ ${alert.text}</button>`
-          : `<span class="alert ${alert.level}">⚠ ${alert.text}</span>`,
+          : alert.point
+            ? `<button class="alert ${alert.level}" data-act="focus-point" data-x="${alert.point.x}" data-y="${alert.point.y}">⚠ ${alert.text}</button>`
+            : `<span class="alert ${alert.level}">⚠ ${alert.text}</span>`,
       )
       .join('')}</div>`;
   }
@@ -675,6 +689,7 @@ export class Hud {
       <h4>${info.icon} ${info.name} — hasta ${storageOf(s, ME)}</h4>
       ${rows || '<div class="pop-row">Todavía no producís.</div>'}
       ${rate.consumption > 0 ? `<div class="pop-row"><span>Consumo de ${populationOf(s, ME)} personas</span><b>${signed(-rate.consumption)}/min</b></div>` : ''}
+      ${rate.irrigation > 0 ? `<div class="pop-row"><span>Riego de granjas</span><b>${signed(-rate.irrigation)}/min</b></div>` : ''}
       <div class="pop-row total"><span>Neto</span><b>${signed(rate.net)}/min</b></div>
     </div>`;
   }
@@ -729,6 +744,7 @@ export class Hud {
       <p class="note good">Ventaja: ${site.advantage}</p>
       <p class="note bad">Desventaja: ${site.disadvantage}</p>
       <p class="note">${this.specialtyText(site)}</p>
+      ${siteWarnings(s.eco[site.id]).map((text) => `<p class="note bad">${text}</p>`).join('')}
       ${problem ? `<p class="note bad">${problem}</p>` : ''}`;
   }
 
@@ -769,8 +785,8 @@ export class Hud {
     const capacity = capacityOf(s, base);
     const free = population - assignedTotal(base);
     const myTurn = activePlayer(s) === ME && s.phase.kind === 'decisions';
-    const labels: Record<Tab, string> = { jobs: 'Trabajos', build: 'Construir', upgrades: 'Mejoras', army: 'Ejército' };
-    const tabs = (['jobs', 'build', 'upgrades', 'army'] as Tab[])
+    const labels: Record<Tab, string> = { jobs: 'Trabajos', build: 'Construir', upgrades: 'Mejoras', army: 'Ejército', land: 'Entorno' };
+    const tabs = (['jobs', 'build', 'upgrades', 'army', 'land'] as Tab[])
       .map(
         (tab) =>
           `<button class="tab${this.tab === tab ? ' on' : ''}" data-act="tab" data-tab="${tab}">${labels[tab]}</button>`,
@@ -783,7 +799,9 @@ export class Hud {
           ? this.buildHtml(s, base, myTurn)
           : this.tab === 'upgrades'
             ? this.upgradesHtml(s, base, myTurn)
-            : this.armyHtml(s, base, myTurn);
+            : this.tab === 'army'
+              ? this.armyHtml(s, base, myTurn)
+              : this.landHtml(s, base);
     return `<header>
         <h3>${base.name}</h3>
         <button class="x" data-act="close" aria-label="Cerrar">✕</button>
@@ -826,6 +844,21 @@ export class Hud {
         <span class="switch${base.autoSurvive ? ' on' : ''}"></span>
         Supervivencia automática
       </button>`;
+  }
+
+  private landHtml(s: GameState, base: Base) {
+    const { meters, notes } = landStatus(s, base);
+    const rows = meters
+      .map(
+        (m) => `<div class="meter ${m.tone}">
+          <span>${m.icon} ${m.name}</span>
+          <b>${m.value}</b>
+          <i><u style="width:${Math.round(m.ratio * 100)}%"></u></i>
+        </div>`,
+      )
+      .join('');
+    const texts = notes.map((n) => `<p class="note ${n.tone}">${n.text}</p>`).join('');
+    return `${rows}${texts}`;
   }
 
   private costsHtml(s: GameState, cost: Stock) {

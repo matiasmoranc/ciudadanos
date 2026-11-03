@@ -15,6 +15,7 @@ src/core/     Simulación pura: sin Phaser, sin DOM, sin Math.random ni Date.
   trade.ts    Ofertas entre jugadores y mercado neutral.
   path.ts     Rutas por tierra para viajes largos.
   war.ts      Soldados, ejércitos, combate, muros, saqueo y conquista.
+  ecology.ts  Bosques, humedad, fertilidad y derrumbes.
   bot.ts      IA. Solo usa los mismos comandos que un humano.
   match.ts    Une tick + bots: es lo que correría un servidor.
 src/render/   Phaser: dibuja el estado, nunca lo modifica.
@@ -45,6 +46,7 @@ Definidas en `src/core/types.ts`.
 | `Offer` | quién ofrece, a quién, qué da, qué pide, respuestas |
 | `ResourceNode` | árbol, roca, arbusto, orilla, hierro u oro; cantidad restante |
 | `Site` | ubicación fundable, nombre, recursos alcanzables, estrellas, especialidad |
+| `RegionEco` | bosque, humedad, sequía, tensión del terreno, grietas, derrumbe |
 
 Los soldados no son entidades sueltas: viven como contadores en `Base.garrison` o en un `Army`, un grupo con posición, orden y ruta. Así el jugador nunca maneja unidades individuales, y 200 soldados no pesan más que unos pocos ejércitos. Las listas `RESOURCES`, `JOBS` y `BUILDINGS` están pensadas para extenderse sin tocar la lógica de turnos.
 
@@ -66,7 +68,7 @@ Cada persona consume 1,5 de comida y 1,5 de agua por minuto. Sale una regla simp
 
 Producción neta mostrada = trabajadores con fuente × tasa × productividad − consumo. Se calcula por base y se suma.
 
-El mapa pone el límite: árboles, rocas y arbustos son finitos, y las orillas y los pozos no se agotan. Las granjas tienen 3 puestos y producción infinita, pero cuestan madera y agua.
+El mapa pone el límite: rocas y vetas son finitas, árboles y arbustos vuelven despacio, y las orillas y los pozos no se agotan. Las granjas tienen 3 puestos y producción infinita, pero cuestan madera y agua.
 
 **Especialidad regional.** Cada región rinde 25 % más en lo suyo: bosque en madera, montaña en piedra y hierro, cantera en oro, pradera en comida, valle en comida y agua, llanura en construcción. Se suma a lo que ya marca la geografía, que es la mayor diferencia.
 
@@ -113,7 +115,7 @@ La economía corre en todos los turnos porque el tick no mira de quién es el tu
 | Construcción | Costo | Obra (1 constructor) | Efecto |
 |---|---|---|---|
 | Casa | 20 madera + 10 piedra | 20 s | +8 de capacidad en la base |
-| Granja | 15 madera + 10 agua | 15 s | 3 puestos a 10 comida/min |
+| Granja | 15 madera + 10 agua | 15 s | 3 puestos a 10 comida/min; usa 0,25 de agua por comida |
 | Pozo | 20 piedra + 10 madera | 15 s | 3 puestos de agua en cualquier lugar |
 | Depósito | 25 madera + 15 piedra | 20 s | +200 de capacidad global |
 
@@ -163,13 +165,33 @@ Cada soldado sale de un ciudadano de la base, que deja de trabajar, y sigue cont
 
 **Órdenes.** Trasladar, conquistar, saquear, defender una posición, atacar un ejército y retirarse. Solo se cambian en la fase de decisiones propia. «Atacar torre» no es una orden aparte: las torres son parte del asalto.
 
-## 8. Riesgos de equilibrio
+## 8. Mundo vivo
+
+Todo sale de lo que hace la gente: no hay catástrofes al azar. Se actualiza cada 5 segundos, por región (el círculo de influencia de cada sitio). El terreno no cambia, así que las rutas siguen siendo válidas; un lago que se achica cierra orillas, pero no abre caminos.
+
+**Bosque.** Cada región mide cuánta madera conserva. Sobre el 50 % nace un árbol cada 2 minutos, entre 20 % y 50 % cada 5, y por debajo cada 10. Un brote tarda 2 minutos y medio en poder talarse y nace junto a lo que sigue en pie. Por eso una región sana sostiene unos 2 leñadores sin retroceder. Los arbustos también vuelven, y más lento con la tierra pobre.
+
+**Humedad.** Parte de 100 % y baja hacia un objetivo que depende del daño por tala (de 50 % a 20 % de bosque) y del agua extraída por encima de lo que la región soporta (24 por minuto, más 6 por orilla, hasta 60). Tarda minutos en moverse en ambos sentidos. A menos de 60 % avisa; a menos de 40 % empieza la sequía, que termina al pasar 55 %.
+
+**Sequía.** Cultivos y agua rinden menos (hasta 50 %), se seca la mitad de las orillas, aunque siempre queda alguna, los árboles amarillean y el lago muestra su lecho de barro.
+
+**Fertilidad.** Es de cada granja. Con 3 trabajadores cae hasta 50 % en 6 minutos, con 2 se mantiene, con 1 se recupera y sin nadie se recupera al doble. Rinde según ese porcentaje. Una región talada tiene un techo de fertilidad de hasta 30 % menos.
+
+**Derrumbes.** Solo en montañas y canteras. Cada unidad de piedra, hierro u oro suma tensión, y el terreno descarga 12 por minuto: 2 trabajadores casi nunca la acumulan. Con 120 de tensión y más de 2 trabajadores aparecen grietas y una cuenta de 90 segundos. Si quedan 2 o menos, el terreno se asienta. Si no, se cae: mueren hasta 2 trabajadores, nunca el último de la base, y las vetas a 70 unidades quedan bloqueadas 2 minutos. No ocurre sin que el dueño haya tenido un turno desde el aviso, porque las órdenes solo se cambian en turno propio.
+
+**Información.** La pestaña Entorno de cada base muestra los cuatro medidores y qué hacer. Las alertas fijas y los avisos cubren grietas, sequía y tierra cansada. Al elegir un lugar nuevo se avisa si su bosque está dañado o sufre sequía. Las estrellas describen el lugar original.
+
+**Animaciones.** Árboles que caen y rebrotan, polvo y escombros, grietas, tierra reseca, lechos de barro, cultivos pálidos, sombras de nubes, destellos en los lagos y aves que dejan las regiones taladas.
+
+## 9. Riesgos de equilibrio
 
 - **Posición inicial.** Las regiones se reparten con una bolsa fija de biomas (5 bosques, 4 llanuras, 3 montañas, 2 praderas, 2 valles, 2 canteras), evitando repetir el bioma de las vecinas. Un jugador no debería poder quedarse con todo.
 - **Draft bloqueado.** La distancia mínima podría dejar a alguien sin lugar. Con 200 unidades, quien elegía último en 4 jugadores tenía a veces un solo sitio malo; se bajó a 165. Si aun así no queda ninguno, esa regla se relaja. Una prueba recorre muchas semillas.
 - **Base de 2 sin salida.** Dos ciudadanos no pueden trabajar y reproducirse a la vez: fundar 2 bases reparte fuerzas. Es una decisión intencional del prompt, pero conviene revisarla jugando.
 - **Base con menos de 2.** No puede reproducirse y en la Etapa 1 no hay migración. Por eso las muertes por escasez salen de la base más poblada. La expedición de la Etapa 2 lo resuelve.
-- **Agotamiento.** Sin regeneración hasta la Etapa 4, una base de pocos árboles se queda sin madera. Es parte de elegir bien; el comercio y las nuevas bases lo alivian más adelante.
+- **Agotamiento.** La regeneración es lenta a propósito: una base de pocos árboles sigue dependiendo del comercio y de nuevas bases.
+- **Efectos poco frecuentes.** En 6 partidas de 4 bots a ritmo rápido (unos 18 minutos) la humedad bajó hasta 65 % y no hubo sequías ni derrumbes. Es lo buscado para quien no abusa, pero conviene revisar si una persona llega a verlos jugando.
+- **Sequía invisible en regiones ajenas.** Solo avisa a quien tiene base ahí.
 - **Pelea tardía de los bots.** Empiezan a atacar alrededor de la ronda 15 a 20, porque priorizan crecer. Evita derrotas tempranas, pero conviene revisarlo jugando.
 - **Saqueos repetidos.** Un bot puede volver varias veces sobre la misma base débil. El límite por ataque frena el daño.
 - **Sin caminos construidos.** El camino pavimentado y el costo por terreno todavía no afectan la velocidad.
@@ -177,10 +199,10 @@ Cada soldado sale de un ciudadano de la base, que deja de trabajar, y sigue cont
 - **Expansión tardía.** Como las expediciones necesitan más de 3 ciudadanos en origen, hay que crecer antes de expandirse. Es intencional.
 - **Bola de nieve.** La reproducción crece rápido si hay vivienda. Las casas exigen madera y piedra a la vez, lo que frena a quien solo tiene una.
 
-## 9. Etapas
+## 10. Etapas
 
 - **Etapa 1 (hecha):** mapa, draft, turnos, ciudadanos autónomos, trabajos, inventario global, casas, granjas, pozos, depósitos, reproducción, consumo, construcción automática, bots básicos y puntaje.
 - **Etapa 2 (hecha):** hierro, oro, nuevas bases, comercio, mercado neutral, mejoras, especialidad regional y alertas.
 - **Etapa 3 (hecha):** cuarteles, soldados, traslados, combate automático, muros, torres, saqueo, conquista, posturas y mapa más grande con minimapa.
-- **Etapa 4:** mundo vivo.
+- **Etapa 4 (hecha):** deforestación, regeneración, sequías, fertilidad, derrumbes y animaciones ambientales.
 - **Etapa 5:** online, tutorial, sonido, bots con tres dificultades.

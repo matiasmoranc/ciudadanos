@@ -61,6 +61,7 @@ function barracks(s: GameState, baseId: number): Building {
     users: 0,
     slot: null,
     hp: 0,
+    soil: 1,
   };
 }
 
@@ -180,6 +181,7 @@ describe('ejército', () => {
         users: 0,
         slot,
         hp: 400,
+        soil: 1,
       });
     }
     expect(ringClosed(s, enemy)).toBe(true);

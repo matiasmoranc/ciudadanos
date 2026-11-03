@@ -1,10 +1,12 @@
 import Phaser from 'phaser';
 import { BASE_RADIUS, TICKS_PER_SECOND } from '../core/config';
+import { moistureYield } from '../core/ecology';
 import { capacityOf, citizensOf, needsWork, siteAvailability } from '../core/game';
 import { troopCount, wallEnds } from '../core/war';
 import { stepMatch } from '../core/match';
 import type { Army, Base, Building, Citizen, GameState, Point, ResourceNode } from '../core/types';
 import { ART_SCALE, buildingKey, citizenKey, createArt, soldierKey } from './art';
+import { EcologyView } from './ecology';
 import { MAP_HEIGHT, MAP_WIDTH, TERRAIN_SCALE, ellipseOf, toScreen, toWorld } from './iso';
 import { paintTerrain } from './terrain';
 
@@ -71,6 +73,8 @@ export class WorldScene extends Phaser.Scene {
   private dpr = 1;
 
   private nodeViews = new Map<number, Phaser.GameObjects.Image>();
+  private stumps = new Map<number, Phaser.GameObjects.Image>();
+  private ecology!: EcologyView;
   private citizenViews = new Map<number, CitizenView>();
   private buildingViews = new Map<number, BuildingView>();
   private baseViews = new Map<number, BaseView>();
@@ -114,6 +118,15 @@ export class WorldScene extends Phaser.Scene {
       this.siteMarks.set(site.id, this.add.graphics({ x: p.x, y: p.y }).setDepth(-4));
     }
 
+    this.ecology = new EcologyView(
+      this,
+      state,
+      (nodeIds, tint) => this.tintNodes(nodeIds, tint),
+      (owner) => {
+        if (owner === 0) this.cameras.main.shake(320, 0.004);
+      },
+    );
+
     this.setupCamera();
     this.setupInput();
     this.scale.on('resize', () => this.fitLimits());
@@ -132,6 +145,12 @@ export class WorldScene extends Phaser.Scene {
       .setDepth(p.y);
     sprite.setData('size', size);
     this.nodeViews.set(node.id, sprite);
+  }
+
+  private tintNodes(nodeIds: number[], tint: number) {
+    for (const id of nodeIds) {
+      if (this.host.state.nodes[id].kind === 'tree') this.nodeViews.get(id)?.setTint(tint);
+    }
   }
 
   private minZoom() {
@@ -278,9 +297,11 @@ export class WorldScene extends Phaser.Scene {
     this.syncCitizens(state, delta, time);
     this.syncExpeditions(state, delta, time);
     this.syncArmies(state, delta, time);
+    this.ecology.frame(state, delta, time);
     if (time - this.lastSync > 120) {
       this.lastSync = time;
       this.syncNodes(state, time);
+      this.ecology.sync(state, time);
       this.syncBases(state);
       this.syncBuildings(state, time);
       this.syncSiteMarks(state, time);
@@ -458,33 +479,49 @@ export class WorldScene extends Phaser.Scene {
   private syncNodes(state: GameState, time: number) {
     for (const [id, sprite] of this.nodeViews) {
       const node = state.nodes[id];
-      if (node.amount === 0) {
-        this.nodeViews.delete(id);
-        this.removeNode(node, sprite);
+      if (node.amount === 0 && node.growth === 0) {
+        if (sprite.visible) this.removeNode(node, sprite);
         continue;
       }
-      if (node.kind !== 'tree') {
-        const ratio = 0.55 + (node.amount / node.max) * 0.45;
-        sprite.setScale(pxScale * sprite.getData('size') * ratio);
+      const size = pxScale * sprite.getData('size');
+      if (!sprite.visible) {
+        sprite.setVisible(true);
+        this.stumps.get(id)?.destroy();
+        this.stumps.delete(id);
       }
+      if (node.growth > 0) {
+        sprite.setScale(size * (0.22 + node.growth * 0.78));
+        continue;
+      }
+      if (node.kind === 'tree') sprite.setScale(size);
+      else sprite.setScale(size * (0.55 + (node.amount / node.max) * 0.45));
+      sprite.setAlpha(node.closed === 'rubble' ? 0.45 : 1);
       sprite.setRotation(node.users > 0 && node.kind === 'tree' ? Math.sin(time * 0.014 + id) * 0.04 : 0);
     }
   }
 
   private removeNode(node: ResourceNode, sprite: Phaser.GameObjects.Image) {
+    // Cae una copia: el nodo conserva su imagen por si vuelve a crecer.
+    const falling = this.add
+      .image(sprite.x, sprite.y, sprite.texture.key)
+      .setOrigin(sprite.originX, sprite.originY)
+      .setScale(sprite.scaleX)
+      .setTint(sprite.tintTopLeft)
+      .setDepth(sprite.depth);
+    sprite.setVisible(false).setRotation(0);
     if (node.kind !== 'tree') {
-      this.tweens.add({ targets: sprite, alpha: 0, duration: 400, onComplete: () => sprite.destroy() });
+      this.tweens.add({ targets: falling, alpha: 0, duration: 400, onComplete: () => falling.destroy() });
       return;
     }
     const p = toScreen(node.x, node.y);
-    this.add.image(p.x, p.y, 'stump').setOrigin(0.5, 0.75).setScale(pxScale).setDepth(p.y - 1);
+    this.stumps.set(node.id, this.add.image(p.x, p.y, 'stump').setOrigin(0.5, 0.75).setScale(pxScale).setDepth(p.y - 1));
     this.tweens.add({
-      targets: sprite,
+      targets: falling,
       rotation: 1.5,
       alpha: 0,
       duration: 650,
       ease: 'Quad.easeIn',
-      onComplete: () => sprite.destroy(),
+      onComplete: () => falling.destroy(),
     });
   }
 
@@ -557,8 +594,12 @@ export class WorldScene extends Phaser.Scene {
         view.star = this.add.image(p.x + 13, p.y - 2, 'upgrade-star').setScale(pxScale).setDepth(p.y + 2);
       }
       if (building.done && building.type === 'farm') {
-        const stage = Math.floor((time * 0.00025 + building.id) % 3);
+        const base = state.bases.find((b) => b.id === building.baseId);
+        const vigor = base ? building.soil * moistureYield(state.eco[base.siteId]) : 1;
+        // Una tierra cansada no llega a dar espigas altas.
+        const stage = Math.floor((time * 0.00025 + building.id) % (vigor < 0.65 ? 2 : 3));
         view.sprite?.setTexture(`crops-${stage}`);
+        view.sprite?.setTint(vigor < 0.85 ? 0xd9b77a : 0xffffff);
       }
     }
   }

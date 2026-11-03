@@ -109,7 +109,7 @@ export const BUILDINGS: Record<BuildingType, BuildingInfo> = {
     icon: '🌾',
     cost: { wood: 15, water: 10 },
     seconds: 15,
-    effect: `${WORKSITE_SLOTS} puestos que producen más comida`,
+    effect: `${WORKSITE_SLOTS} puestos que producen más comida y usan agua`,
     footprint: 34,
   },
   well: {
@@ -266,5 +266,49 @@ export const EXPEDITION_SETTLERS = 3;
 export const MARKET_VALUE: Record<ResourceId, number> = { wood: 1, stone: 1, food: 1, water: 1, iron: 3, gold: 5 };
 export const MARKET_SPREAD = 2;
 export const MARKET_LOT = 5;
+
+// ---- Ecosistema ------------------------------------------------------------
+
+export const ECO_STEP_SECONDS = 5;
+
+/** Por debajo de esta parte del bosque la región empieza a sufrir. */
+export const FOREST_THIN = 0.5;
+export const FOREST_BARE = 0.2;
+/** Con menos madera que esto la región no cuenta como boscosa. */
+export const MIN_FOREST_WOOD = 180;
+/** Segundos entre un árbol nuevo y el siguiente en cada región. */
+export const REGROW_SECONDS = { healthy: 120, thin: 300, bare: 600 };
+export const SAPLING_SECONDS = 150;
+export const BUSH_REGROW_SECONDS = 150;
+export const BUSH_GROWTH_SECONDS = 60;
+
+export const MOISTURE_DOWN_SECONDS = 300;
+export const MOISTURE_UP_SECONDS = 240;
+export const DRYING_LEVEL = 0.6;
+export const DROUGHT_START = 0.4;
+export const DROUGHT_END = 0.55;
+/** Agua por minuto que una región soporta sin resecarse. */
+export const THIRST_BASE = 24;
+export const THIRST_PER_SHORE = 6;
+export const THIRST_MAX = 60;
+
+/** Agua que usa una granja por cada unidad de comida. */
+export const FARM_WATER = 0.25;
+export const SOIL_MIN = 0.5;
+export const SOIL_TIRED = 0.7;
+export const SOIL_TIRE_SECONDS = 360;
+export const SOIL_REST_SECONDS = 180;
+
+export const UNSTABLE_BIOMES: Biome[] = ['mountain', 'rocky'];
+export const MINING_JOBS: Job[] = ['stone', 'iron', 'gold'];
+/** Con esta gente picando, el terreno aguanta sin límite. */
+export const SAFE_MINERS = 2;
+export const STRAIN_DECAY_PER_MIN = 12;
+export const STRAIN_LIMIT = 120;
+export const STRAIN_AFTER = 50;
+export const CRACK_SECONDS = 90;
+export const RUBBLE_SECONDS = 120;
+export const COLLAPSE_RADIUS = 70;
+export const COLLAPSE_DEATHS = 2;
 
 export const SCORE = { citizen: 2, soldier: 2, building: 5, base: 10, upgrade: 3 };

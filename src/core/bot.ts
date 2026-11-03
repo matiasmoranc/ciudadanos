@@ -2,13 +2,17 @@ import {
   BIRTH_COST,
   CONSUMPTION_PER_MIN,
   EXPEDITION_COST,
+  FARM_WATER,
   JOBS,
   MARKET_VALUE,
+  MINING_JOBS,
   REPRODUCTION_SECONDS,
   RESOURCES,
+  SAFE_MINERS,
   SOLDIERS,
   TRUCE_ROUNDS,
   UPGRADES,
+  WORKSITE_SLOTS,
   WORK_SECONDS,
 } from './config';
 import {
@@ -168,7 +172,8 @@ function assignWorkers(s: GameState, owner: Player, bases: Base[]) {
   const births = (60 / REPRODUCTION_SECONDS) * pairs;
   const feed = (cost: number, rate: number) => Math.ceil((total * CONSUMPTION_PER_MIN + births * cost) / rate);
   let foodLeft = feed(BIRTH_COST.food, perFood);
-  let waterLeft = feed(BIRTH_COST.water, perWater);
+  const farmers = Math.min(foodLeft, s.buildings.filter((b) => b.owner === owner.id && b.type === 'farm' && b.done).length * WORKSITE_SLOTS);
+  let waterLeft = feed(BIRTH_COST.water, perWater) + Math.ceil((farmers * (60 / WORK_SECONDS.farm) * FARM_WATER) / perWater);
 
   // La base más grande carga con la supervivencia; así la chica puede crecer.
   for (const base of largestFirst(s, bases)) {
@@ -176,10 +181,14 @@ function assignWorkers(s: GameState, owner: Player, bases: Base[]) {
     const want = emptyJobs();
     let free = population;
 
+    // Con grietas en el terreno saca gente de las vetas antes de que se derrumben.
+    let miners = s.eco[base.siteId].crack ? SAFE_MINERS : Infinity;
     const take = (job: Job, amount: number) => {
-      const given = Math.max(0, Math.min(free, amount));
+      const allowed = MINING_JOBS.includes(job) ? Math.min(amount, miners) : amount;
+      const given = Math.max(0, Math.min(free, allowed));
       want[job] += given;
       free -= given;
+      if (MINING_JOBS.includes(job)) miners -= given;
       return given;
     };
 
@@ -206,6 +215,7 @@ function assignWorkers(s: GameState, owner: Player, bases: Base[]) {
     } else {
       take(hasSource(s, base, 'food') ? 'food' : 'water', free);
     }
+    if (free > 0) take(hasSource(s, base, 'food') ? 'food' : 'water', free);
 
     applyJobs(s, owner, base, want);
   }

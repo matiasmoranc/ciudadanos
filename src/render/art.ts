@@ -137,6 +137,56 @@ export function createArt(scene: Phaser.Scene, colors: number[]) {
     c.ellipse(7, 3, 3, 1.5, 0, 0, Math.PI * 2);
     c.fill();
   });
+  make(scene, 'rubble', 34, 22, (c) => {
+    shadow(c, 17, 18, 15, 3.8);
+    poly(c, [3, 18, 8, 9, 15, 11, 18, 18], '#8d8f93');
+    poly(c, [13, 19, 18, 6, 26, 8, 31, 18, 22, 20], '#74767b');
+    poly(c, [18, 6, 26, 8, 23, 12, 17, 11], '#b5b7ba');
+    poly(c, [8, 9, 15, 11, 12, 13, 7, 12], '#a8aaad');
+    for (const [x, y] of [[6, 19], [11, 20], [29, 19], [20, 21]]) blob(c, x, y, 1.3, '#6a6c70');
+  });
+  make(scene, 'cracks', 44, 24, (c) => {
+    c.strokeStyle = '#2c2522';
+    c.lineWidth = 1.7;
+    for (const line of [[3, 13, 11, 11, 17, 14, 23, 9, 31, 12, 41, 7], [17, 14, 15, 20, 19, 23], [23, 9, 27, 3], [31, 12, 36, 17]]) {
+      c.beginPath();
+      c.moveTo(line[0], line[1]);
+      for (let i = 2; i < line.length; i += 2) c.lineTo(line[i], line[i + 1]);
+      c.stroke();
+    }
+  });
+  make(scene, 'dust', 16, 16, (c) => {
+    const glow = c.createRadialGradient(8, 8, 1, 8, 8, 8);
+    glow.addColorStop(0, 'rgba(196, 180, 150, 0.95)');
+    glow.addColorStop(1, 'rgba(196, 180, 150, 0)');
+    c.fillStyle = glow;
+    c.fillRect(0, 0, 16, 16);
+  });
+  make(scene, 'blot', 64, 64, (c) => {
+    const glow = c.createRadialGradient(32, 32, 6, 32, 32, 32);
+    glow.addColorStop(0, 'rgba(255, 255, 255, 1)');
+    glow.addColorStop(0.6, 'rgba(255, 255, 255, 0.72)');
+    glow.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    c.fillStyle = glow;
+    c.fillRect(0, 0, 64, 64);
+  });
+  make(scene, 'bird', 12, 6, (c) => {
+    c.strokeStyle = '#2b3136';
+    c.lineWidth = 1.2;
+    c.beginPath();
+    c.moveTo(1, 2);
+    c.quadraticCurveTo(4, 0.5, 6, 4);
+    c.quadraticCurveTo(8, 0.5, 11, 2);
+    c.stroke();
+  });
+  make(scene, 'glint', 10, 4, (c) => {
+    c.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(1, 2);
+    c.lineTo(9, 2);
+    c.stroke();
+  });
   make(scene, 'rock', 26, 20, (c) => {
     shadow(c, 13, 16.5, 11, 3.2);
     poly(c, [2, 15, 6, 6, 13, 3, 21, 6, 24, 15, 13, 18], '#8d8f93');

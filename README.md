@@ -6,9 +6,9 @@ Juego de estrategia por turnos: fundás bases en un mundo natural, repartís a t
 
 ## Estado
 
-Etapas 1 a 3 de 5, jugable contra 1 a 3 bots. Incluye mapa procedural, selección serpiente, turnos con fases de decisiones y comercio, ciudadanos autónomos, seis recursos, inventario global, construcción, mejoras, nuevas bases por expedición, comercio con contraofertas, mercado neutral, especialidad regional, reproducción, escasez, cuarteles, ejércitos, combate, muros, torres, saqueo, conquista, minimapa y alertas de ataque.
+Etapas 1 a 4 de 5, jugable contra 1 a 3 bots. Incluye mapa procedural, selección serpiente, turnos con fases de decisiones y comercio, ciudadanos autónomos, seis recursos, inventario global, construcción, mejoras, nuevas bases por expedición, comercio con contraofertas, mercado neutral, especialidad regional, reproducción, escasez, cuarteles, ejércitos, combate, muros, torres, saqueo, conquista, minimapa, alertas de ataque, deforestación, regeneración de árboles, sequías, fertilidad y derrumbes.
 
-Todavía no hay ecosistema dinámico ni partidas online. El plan por etapas y las reglas están en [docs/DISENO.md](docs/DISENO.md).
+Todavía no hay partidas online. El plan por etapas y las reglas están en [docs/DISENO.md](docs/DISENO.md).
 
 ## Desarrollo
 

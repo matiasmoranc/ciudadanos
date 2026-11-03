@@ -11,6 +11,7 @@ import {
   EXPEDITION_COST,
   EXPEDITION_SETTLERS,
   FARM_UPGRADE_SECONDS,
+  FARM_WATER,
   HOUSE_CAPACITY,
   HOUSE_UPGRADE_CAPACITY,
   JOBS,
@@ -25,6 +26,7 @@ import {
   SHORTAGE_GRACE_SECONDS,
   SHORTAGE_PRODUCTIVITY,
   SHORTAGE_WARNING_SECONDS,
+  SOIL_TIRED,
   SPECIALTY_BONUS,
   START_CITIZENS,
   START_STOCK,
@@ -43,6 +45,7 @@ import {
   WORK_SECONDS,
   seconds,
 } from './config';
+import { createEco, farmsOf, noteExtraction, noteTurn, stepEcology, yieldFactor } from './ecology';
 import { generateMap, isLand, segmentClear } from './mapgen';
 import { findPath } from './path';
 import { stepRng } from './rng';
@@ -105,6 +108,7 @@ export function createGame(seed: number, setups: PlayerSetup[]): GameState {
     phase: { kind: 'draft', order: draft, index: 0, endsAt: seconds(DRAFT_SECONDS), botActAt: seconds(1.5) },
     map,
     nodes: map.nodes.map((n) => ({ ...n })),
+    eco: [],
     players: setups.map((p, id) => ({
       ...p,
       id,
@@ -123,6 +127,7 @@ export function createGame(seed: number, setups: PlayerSetup[]): GameState {
     warned: {},
     nextId: 1,
   };
+  s.eco = createEco(s);
   return s;
 }
 
@@ -133,7 +138,7 @@ export function say(s: GameState, player: number | null, text: string, level: To
 }
 
 /** Avisa como mucho una vez por período, para no llenar la pantalla. */
-function warn(s: GameState, key: string, player: number, text: string, level: ToastLevel, cooldown = 45) {
+export function warn(s: GameState, key: string, player: number, text: string, level: ToastLevel, cooldown = 45) {
   const last = s.warned[key];
   if (last !== undefined && s.tick - last < seconds(cooldown)) return;
   s.warned[key] = s.tick;
@@ -220,7 +225,7 @@ const JOB_NODE: Partial<Record<Job, ResourceNode['kind']>> = {
 };
 const JOB_SITE: Partial<Record<Job, BuildingType>> = { food: 'farm', water: 'well' };
 
-const hasStock = (node: ResourceNode) => node.amount !== 0;
+const hasStock = (node: ResourceNode) => node.amount !== 0 && node.closed === null;
 
 export function hasSource(s: GameState, base: Base, job: Job): boolean {
   if (job === 'build') return s.buildings.some((b) => b.baseId === base.id && needsWork(b));
@@ -234,6 +239,8 @@ export function hasSource(s: GameState, base: Base, job: Job): boolean {
 export interface ResourceRate {
   byBase: { baseId: number; name: string; rate: number }[];
   consumption: number;
+  /** Agua que usan las granjas al producir. */
+  irrigation: number;
   net: number;
 }
 
@@ -243,6 +250,9 @@ export function ratesFor(s: GameState, player: number): Record<ResourceId, Resou
   const productivity = productivityOf(owner);
   const population = populationOf(s, player);
   const result = {} as Record<ResourceId, ResourceRate>;
+  const irrigation = s.citizens
+    .filter((c) => c.owner === player && c.job === 'food' && c.target?.kind === 'building')
+    .reduce((sum, c) => sum + (60 / secondsPerUnit(s, c, s.bases.find((b) => b.id === c.baseId)!)) * productivity * FARM_WATER, 0);
   for (const resource of RESOURCES) {
     const vital = resource === 'food' || resource === 'water';
     const consumption = vital ? population * CONSUMPTION_PER_MIN : 0;
@@ -255,7 +265,8 @@ export function ratesFor(s: GameState, player: number): Record<ResourceId, Resou
       return { baseId: base.id, name: base.name, rate };
     });
     const produced = byBase.reduce((sum, b) => sum + b.rate, 0);
-    result[resource] = { byBase, consumption, net: produced - consumption };
+    const irrigated = resource === 'water' ? irrigation : 0;
+    result[resource] = { byBase, consumption, irrigation: irrigated, net: produced - consumption - irrigated };
   }
   return result;
 }
@@ -266,14 +277,15 @@ export const regionBonus = (s: GameState, base: Base, job: Job) =>
 function secondsPerUnit(s: GameState, c: Citizen, base: Base): number {
   if (c.job === 'idle' || c.job === 'build' || c.job === 'reproduce') return 1;
   let time: number;
+  let farm: Building | undefined;
   if (c.job === 'food') {
     const target = c.target;
-    const farm = target?.kind === 'building' ? s.buildings.find((b) => b.id === target.id) : undefined;
+    farm = target?.kind === 'building' ? s.buildings.find((b) => b.id === target.id) : undefined;
     time = !farm ? WORK_SECONDS.forage : farm.level > 1 ? FARM_UPGRADE_SECONDS : WORK_SECONDS.farm;
   } else {
     time = WORK_SECONDS[c.job];
   }
-  return time / regionBonus(s, base, c.job);
+  return time / regionBonus(s, base, c.job) / yieldFactor(s, base, c.job, farm);
 }
 
 // ---- Comandos --------------------------------------------------------------
@@ -430,6 +442,7 @@ function orderBuilding(s: GameState, player: number, baseId: number, type: Build
     users: 0,
     slot,
     hp: 0,
+    soil: 1,
   });
   if (base.jobs.build === 0) {
     warn(s, `nobuilder:${base.id}`, player, `Asigná un constructor en ${base.name} para empezar la obra.`, 'warn', 20);
@@ -528,6 +541,7 @@ function findBuildSpot(s: GameState, base: Base, type: BuildingType): Point | nu
 // ---- Turnos ----------------------------------------------------------------
 
 function startTurn(s: GameState, player: number) {
+  noteTurn(s, player);
   const offset = 4 + random(s) * 4;
   s.phase = {
     kind: 'decisions',
@@ -635,6 +649,7 @@ export function tick(s: GameState) {
   for (const c of s.citizens) stepCitizen(s, c);
   for (const expedition of [...s.expeditions]) stepExpedition(s, expedition);
   stepWar(s);
+  stepEcology(s);
   for (const base of s.bases) stepReproduction(s, base);
   for (const player of s.players) if (player.alive) stepSurvival(s, player);
   if (s.tick % TICKS_PER_SECOND === 0) checkEliminations(s);
@@ -911,8 +926,11 @@ function stepCitizen(s: GameState, c: Citizen) {
   if (c.target?.kind === 'node') {
     const node = s.nodes[c.target.id];
     if (node.amount > 0) node.amount--;
+  } else if (resource === 'food') {
+    player.stock.water = Math.max(0, player.stock.water - FARM_WATER);
   }
   gain(s, player, resource, 1);
+  noteExtraction(s, base, resource);
 }
 
 function reportNoSource(s: GameState, base: Base, job: Job) {
@@ -1035,6 +1053,8 @@ export interface Alert {
   text: string;
   level: 'warn' | 'bad';
   armyId?: number;
+  /** Lugar al que lleva tocar la alerta. */
+  point?: Point;
 }
 
 /** Problemas actuales de un jugador, para mostrarlos sin que tenga que buscarlos. */
@@ -1050,6 +1070,15 @@ export function alertsFor(s: GameState, playerId: number): Alert[] {
     const when = army.sieging ? 'atacando' : `llega en ${etaOf(army)} s`;
     const text = `${s.players[army.owner].name}: ${troopCount(army)} soldados a ${target.name}, ${when}`;
     alerts.push({ key: `army-${army.id}`, text, level: 'bad', armyId: army.id });
+  }
+  for (const base of basesOf(s, playerId)) {
+    const eco = s.eco[base.siteId];
+    if (eco.crack) {
+      const left = Math.ceil((eco.crackAt - s.tick) / TICKS_PER_SECOND);
+      const when = left > 0 ? `derrumbe en ${left} s` : 'derrumbe inminente';
+      alerts.push({ key: `crack-${base.id}`, text: `${base.name}: grietas, ${when}`, level: 'bad', point: eco.crack });
+    }
+    if (eco.drought) alerts.push({ key: `drought-${base.id}`, text: `${base.name}: sequía`, level: 'warn', point: base });
   }
   for (const resource of ['food', 'water'] as const) {
     const name = RESOURCE_INFO[resource].name;
@@ -1072,6 +1101,9 @@ export function alertsFor(s: GameState, playerId: number): Alert[] {
     }
     if (reproductionStatus(s, base) === 'no_housing') {
       alerts.push({ key: `housing-${base.id}`, text: `${base.name}: sin vivienda`, level: 'warn' });
+    }
+    if (farmsOf(s, base).some((farm) => farm.soil < SOIL_TIRED)) {
+      alerts.push({ key: `soil-${base.id}`, text: `${base.name}: tierra cansada`, level: 'warn', point: base });
     }
     const unbuilt = s.buildings.some((b) => b.baseId === base.id && needsWork(b));
     if (unbuilt && base.effective.build === 0) {

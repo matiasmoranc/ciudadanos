@@ -34,6 +34,35 @@ export interface ResourceNode extends Point {
   slots: number;
   /** Recalculado en cada tick: ciudadanos que apuntan a este nodo. */
   users: number;
+  /** Entre 0 y 1 mientras vuelve a crecer; 0 si no está creciendo. */
+  growth: number;
+  /** Sin acceso por una sequía o un derrumbe. */
+  closed: 'dry' | 'rubble' | null;
+  reopenAt: number;
+}
+
+/** Estado ambiental de una región: el círculo de influencia de un sitio. */
+export interface RegionEco {
+  /** Madera que tenía al empezar la partida. */
+  trees: number;
+  /** Nodos más cercanos a este sitio que a otro: los que le toca hacer rebrotar. */
+  own: number[];
+  /** Parte del bosque original que sigue en pie. */
+  forest: number;
+  moisture: number;
+  drought: boolean;
+  /** Agua extraída por minuto, suavizada. */
+  thirst: number;
+  drawn: number;
+  regrow: number;
+  bushes: number;
+  /** Tensión del terreno por extraer piedra y metales. */
+  strain: number;
+  crack: Point | null;
+  crackAt: number;
+  /** El dueño ya tuvo un turno desde que aparecieron las grietas. */
+  crackTurn: boolean;
+  rubble: (Point & { until: number }) | null;
 }
 
 export interface Site extends Point {
@@ -103,6 +132,8 @@ export interface Building extends Point {
   /** Puesto en el anillo de muros; null para el resto de los edificios. */
   slot: number | null;
   hp: number;
+  /** Fertilidad de una granja: baja con el uso intensivo y vuelve al descansar. */
+  soil: number;
 }
 
 export interface Troops {
@@ -202,6 +233,7 @@ export interface GameState {
   phase: Phase;
   map: GameMap;
   nodes: ResourceNode[];
+  eco: RegionEco[];
   players: Player[];
   bases: Base[];
   citizens: Citizen[];

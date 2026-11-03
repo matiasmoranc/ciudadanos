@@ -266,7 +266,7 @@ export function generateMap(seed: number): GameMap {
   const nodes: ResourceNode[] = [];
   const addNode = (kind: NodeKind, x: number, y: number) => {
     const amount = kind === 'water' ? -1 : NODE_AMOUNT[kind];
-    nodes.push({ id: nodes.length, kind, x, y, amount, max: amount, slots: NODE_SLOTS[kind], users: 0 });
+    nodes.push({ id: nodes.length, kind, x, y, amount, max: amount, slots: NODE_SLOTS[kind], users: 0, growth: 0, closed: null, reopenAt: 0 });
   };
   for (let gy = SEED_STEP; gy < WORLD_SIZE; gy += SEED_STEP) {
     for (let gx = SEED_STEP; gx < WORLD_SIZE; gx += SEED_STEP) {
